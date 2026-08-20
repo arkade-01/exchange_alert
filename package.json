@@ -1,0 +1,27 @@
+{
+  "name": "exchange_alert",
+  "version": "1.0.0",
+  "description": "Scans CEX perpetual futures for rising open interest + volume and posts ranked alerts to Telegram",
+  "license": "MIT",
+  "author": "arkade",
+  "type": "module",
+  "scripts": {
+    "scan": "tsx src/index.ts --once",
+    "scan:dry": "tsx src/index.ts --once --dry-run",
+    "loop": "tsx src/index.ts --loop",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx test/cooldown.mts && tsx test/snapshot.mts"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "p-limit": "^6.2.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.13.5",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}
