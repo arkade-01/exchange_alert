@@ -12,8 +12,7 @@
     "scan:dry": "tsx src/index.ts --once --dry-run",
     "loop": "tsx src/index.ts --loop",
     "typecheck": "tsc --noEmit",
-    "pretest": "rm -f .test.db .test.db-wal .test.db-shm",
-    "test": "DB_PATH=.test.db tsx test/cooldown.mts && DB_PATH=.test.db tsx test/snapshot.mts"
+    "test": "rm -f .test.db .test.db-wal .test.db-shm && DB_PATH=.test.db tsx test/cooldown.mts && DB_PATH=.test.db tsx test/snapshot.mts"
   },
   "engines": {
     "node": ">=22"
@@ -30,10 +29,5 @@
     "@types/node": "^22.13.5",
     "tsx": "^4.19.3",
     "typescript": "^5.7.3"
-  },
-  "allowScripts": {
-    "esbuild@0.28.2": true,
-    "fsevents@2.3.3": true,
-    "better-sqlite3@13.0.3": true
   }
 }
