@@ -40,6 +40,14 @@ const Schema = z.object({
   NORM_PRICE_24H_MAX: z.coerce.number().default(40),
   NORM_FUNDING_MAX: z.coerce.number().default(0.001),
 
+  // Resolve through these servers instead of the system resolver. The escape
+  // hatch for an ISP that NXDOMAINs exchange APIs while the hosts themselves
+  // answer fine. Empty = system DNS.
+  DNS_SERVERS: z
+    .string()
+    .default("")
+    .transform((s) => s.split(",").map((x) => x.trim()).filter(Boolean)),
+
   // Base URLs are overridable so a blocked ISP can be routed around via an
   // official mirror (e.g. Bybit's api.bytick.com) without touching code.
   BINANCE_BASE_URL: z.string().url().default("https://fapi.binance.com"),

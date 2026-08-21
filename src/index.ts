@@ -1,6 +1,10 @@
 import { config } from "./config.js";
+import { installDnsOverride } from "./net.js";
 import { commitAlerts, formatMessage, scan } from "./scanner.js";
 import { sendMessage } from "./telegram.js";
+
+// Must run before the first request goes out.
+installDnsOverride();
 
 interface Args {
   once: boolean;
