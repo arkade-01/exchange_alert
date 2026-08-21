@@ -380,7 +380,7 @@ export function formatMessage(result: ScanResult): string {
       : "";
 
     return (
-      `<b>${i + 1}. ${a.base}</b>  score ${a.score.toFixed(2)}${confirm}\n` +
+      `<b>${i + 1}. ${a.base}</b>  score ${Math.round(a.score * 100)}${confirm}\n` +
       `  OI <b>${sign(a.oiDeltaPct)}${a.oiDeltaPct.toFixed(1)}%</b> · px ${px} · vol ${fmtUsd(a.quoteVol24hUsd)}\n` +
       `  longs building · ${venues} · funding ${funding}`
     );

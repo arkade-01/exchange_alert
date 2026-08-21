@@ -114,6 +114,7 @@ const funding = clamp01(Math.abs(fundingRate) / 0.001);       // crowding penalt
 const cross   = Math.min(exchangesFiring - 1, 2) * 0.15;      // multi-exchange bonus, up to +0.30
 
 score = 0.45*nOi + 0.20*nVol + 0.25*nPrice + cross - 0.15*funding;
+// Computed 0..1-ish (real range ~-0.15..1.20); displayed x100 as an integer.
 ```
 
 - OI delta carries the most weight — it's the fresh signal.
@@ -143,11 +144,11 @@ Without it, the same coin re-alerts every scan. Use SQLite (already present for 
 🟢 <b>OI Scanner</b> — 3 signals · 1h window
 <i>14:32 UTC</i>
 
-<b>1. ARB</b>  score 0.82
+<b>1. ARB</b>  score 82
   OI <b>+12.4%</b> · px +3.1% · vol $84M
   longs building · Binance, Bybit · funding 0.011%
 
-<b>2. SUI</b>  score 0.74
+<b>2. SUI</b>  score 74
   OI <b>+9.8%</b> · px +1.2% · vol $210M
   longs building · Bybit · funding 0.004%
 ```
