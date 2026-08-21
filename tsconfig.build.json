@@ -1,0 +1,11 @@
+{
+  // Emit config. tsconfig.json stays noEmit and keeps covering test/ for typecheck.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    "sourceMap": true
+  },
+  "include": ["src/**/*.ts"]
+}

@@ -144,6 +144,18 @@ export function recordAlerted(
 }
 
 /**
+ * True once anything has ever been alerted. A fresh file means lost state — a
+ * new volume, a wiped container — which would otherwise re-alert the entire
+ * current bucket on the next scan.
+ */
+const anyAlert = db.prepare(
+  `SELECT 1 FROM alert_state WHERE last_alerted_ts > 0 LIMIT 1`,
+);
+export function hasAlertHistory(): boolean {
+  return anyAlert.get() !== undefined;
+}
+
+/**
  * Track bucket membership for the "left the bucket and came back" rule.
  * Anything currently in the bucket is flagged 1; everything else resets to 0.
  */

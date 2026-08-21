@@ -6,14 +6,20 @@
   "author": "arkade",
   "type": "module",
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/index.js --loop",
     "scan": "tsx src/index.ts --once",
     "scan:dry": "tsx src/index.ts --once --dry-run",
     "loop": "tsx src/index.ts --loop",
     "typecheck": "tsc --noEmit",
-    "test": "tsx test/cooldown.mts && tsx test/snapshot.mts"
+    "pretest": "rm -f .test.db .test.db-wal .test.db-shm",
+    "test": "DB_PATH=.test.db tsx test/cooldown.mts && DB_PATH=.test.db tsx test/snapshot.mts"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "dependencies": {
-    "better-sqlite3": "^11.8.1",
+    "better-sqlite3": "^13.0.3",
     "dotenv": "^16.4.7",
     "p-limit": "^6.2.0",
     "undici": "^8.10.0",
@@ -26,8 +32,8 @@
     "typescript": "^5.7.3"
   },
   "allowScripts": {
-    "better-sqlite3@11.10.0": true,
     "esbuild@0.28.2": true,
-    "fsevents@2.3.3": true
+    "fsevents@2.3.3": true,
+    "better-sqlite3@13.0.3": true
   }
 }

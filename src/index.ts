@@ -1,4 +1,5 @@
 import { config } from "./config.js";
+import { hasAlertHistory } from "./db.js";
 import { installDnsOverride } from "./net.js";
 import { commitAlerts, formatMessage, scan } from "./scanner.js";
 import { sendMessage } from "./telegram.js";
@@ -32,7 +33,12 @@ function parseArgs(argv: string[]): Args {
   return args;
 }
 
-async function runOnce(dryRun: boolean): Promise<void> {
+/**
+ * `prime` records cooldowns without sending. Used for the first scan of a
+ * worker that booted with no alert history — a fresh container or a new volume
+ * — where every name currently in the bucket would otherwise be re-announced.
+ */
+async function runOnce(dryRun: boolean, prime = false): Promise<void> {
   const result = await scan();
   const s = result.stats;
 
@@ -53,6 +59,15 @@ async function runOnce(dryRun: boolean): Promise<void> {
   }
   if (result.alerts.length === 0) return; // stay quiet when there is nothing to say
 
+  if (prime) {
+    console.error(
+      `  priming: ${result.alerts.length} alert(s) recorded, not sent ` +
+        `(no alert history — treating this scan as the baseline)`,
+    );
+    commitAlerts(result);
+    return;
+  }
+
   await sendMessage(message);
   commitAlerts(result);
 }
@@ -71,23 +86,43 @@ async function main(): Promise<void> {
   }
 
   let stopping = false;
+  // Set while the loop is idling between scans, so a signal cuts the wait short
+  // instead of leaving the process alive until the interval elapses.
+  let wake: (() => void) | null = null;
   const stop = () => {
     stopping = true;
     console.error("\nShutting down after the current scan…");
+    wake?.();
   };
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
 
+  // A worker that boots with an empty database has lost its cooldowns; its
+  // first scan is a baseline, not news. Manual --once runs are never primed.
+  let prime = !args.dryRun && !hasAlertHistory();
+  if (prime) {
+    console.error("No alert history — first scan will prime cooldowns silently.");
+  }
+
   console.error(`Looping every ${args.intervalMin} min. Ctrl-C to stop.`);
   while (!stopping) {
     try {
-      await runOnce(args.dryRun);
+      await runOnce(args.dryRun, prime);
+      prime = false;
     } catch (err) {
       // A single bad scan must never kill the worker.
       console.error(`Scan failed: ${(err as Error).message}`);
     }
     if (stopping) break;
-    await new Promise((r) => setTimeout(r, args.intervalMin * 60_000));
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, args.intervalMin * 60_000);
+      // Waking early must also drop the timer, or the process lingers until it fires.
+      wake = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+    });
+    wake = null;
   }
 }
 
