@@ -102,6 +102,18 @@ check(
   premove.admits({ priceChgPct24h: 2, priceChgPctWindow: 0.4 }),
   true,
 );
+// The real case from a live scan: ZEN was flat over 15m but +13.8% on the day.
+// Quiet-right-now is not the same as hasn't-gone-yet.
+check(
+  "10b. pre-move rejects a coin that already ran today",
+  premove.admits({ priceChgPct24h: 13.8, priceChgPctWindow: -0.1 }),
+  false,
+);
+check(
+  "10c. …while the same shape on an unmoved coin still qualifies",
+  premove.admits({ priceChgPct24h: 2.1, priceChgPctWindow: -0.1 }),
+  true,
+);
 check(
   "11. breakout still tolerates a null window (falls back to 24h)",
   breakout.admits({ priceChgPct24h: 2, priceChgPctWindow: null }),

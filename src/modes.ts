@@ -136,7 +136,10 @@ export const premove: Mode = {
     // entire claim. Falling back to the 24h move would assert what it cannot show.
     s.priceChgPctWindow !== null &&
     Math.abs(s.priceChgPctWindow) <= config.PREMOVE_MAX_ABS_PCHG_WINDOW &&
-    Math.abs(s.priceChgPct24h) <= config.MAX_PCHG_24H,
+    // Quiet over the window is not enough: a name that already ran and is
+    // merely consolidating looks identical at 15m resolution. The day's move
+    // is what separates "has not gone yet" from "has already gone".
+    Math.abs(s.priceChgPct24h) <= config.PREMOVE_MAX_ABS_PCHG_24H,
 
   score(i) {
     const quiet =

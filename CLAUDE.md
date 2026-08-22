@@ -133,8 +133,8 @@ opposite price term.
 quoteVol24hUsd  >= MIN_VOLUME
 oiDeltaPct      >= PREMOVE_MIN_OI_DELTA           // e.g. 3, over a 15m window
 priceChgPctWindow !== null                        // "quiet" must be shown, not assumed
-|priceChgPctWindow| <= PREMOVE_MAX_ABS_PCHG_WINDOW // e.g. 1.5 - a MAXIMUM, not a minimum
-|priceChgPct24h| <= MAX_PCHG_24H
+|priceChgPctWindow| <= PREMOVE_MAX_ABS_PCHG_WINDOW // e.g. 1.5 - quiet RIGHT NOW
+|priceChgPct24h|    <= PREMOVE_MAX_ABS_PCHG_24H    // e.g. 12  - hasn't ALREADY GONE
 score           >= PREMOVE_MIN_SCORE              // looser gates need a floor
 
 // Buckets: BOTH building regimes qualify - this mode calls shorts too.
@@ -146,6 +146,13 @@ const quiet = 1 - clamp01(Math.abs(priceChgPctWindow) / PREMOVE_MAX_ABS_PCHG_WIN
 
 score = 0.40*nOi + 0.15*nVol + 0.30*quiet + cross - 0.15*funding;
 ```
+
+**Pre-move needs its own 24h ceiling**, far tighter than breakout's 40%. Quiet
+over a 15m window and "hasn't moved yet" are not the same claim: a coin up 35%
+on the day that goes flat for a quarter of an hour is late longs into a topped
+move. Two price gates on different timescales is the only pre/post discriminator
+available from OI and price alone — separating them properly needs order flow
+(taker imbalance, funding divergence, multi-timeframe momentum).
 
 **Do not merge the two weight sets.** `breakout` rewards price movement and
 `premove` penalises it; a single scorer cannot express both. `MODE=both` runs
@@ -226,6 +233,7 @@ CONCURRENCY=8
 PREMOVE_WINDOW_MINUTES=15
 PREMOVE_MIN_OI_DELTA=3
 PREMOVE_MAX_ABS_PCHG_WINDOW=1.5
+PREMOVE_MAX_ABS_PCHG_24H=12
 PREMOVE_MIN_SCORE=0.35
 PM_W_OI=0.40
 PM_W_VOL=0.15

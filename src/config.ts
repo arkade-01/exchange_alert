@@ -25,6 +25,12 @@ const Schema = z.object({
   PREMOVE_WINDOW_MINUTES: z.coerce.number().int().positive().default(15),
   PREMOVE_MIN_OI_DELTA: z.coerce.number().default(3),
   PREMOVE_MAX_ABS_PCHG_WINDOW: z.coerce.number().positive().default(1.5),
+  // Pre-move's own 24h ceiling, much tighter than the breakout one. Without it
+  // a coin up 35% on the day qualifies as "pre-move" the moment it goes quiet
+  // for a quarter of an hour — late longs into a topped move, mislabelled as
+  // anticipation. This is the only pre/post discriminator available from OI
+  // and price alone; the rest need order flow.
+  PREMOVE_MAX_ABS_PCHG_24H: z.coerce.number().positive().default(12),
   PREMOVE_MIN_SCORE: z.coerce.number().default(0.35),
 
   // Pre-move weights. Separate from the breakout set because the price term is
