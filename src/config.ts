@@ -9,11 +9,29 @@ const Schema = z.object({
   TELEGRAM_CHAT_ID: z.string().default(""),
   EXCHANGES: z.string().default("binance,bybit").transform(csv),
 
-  // Scan window + gates
+  // Which scan modes run. "breakout" is the original behaviour (OI and price
+  // both rising); "premove" hunts the opposite shape — OI committing while
+  // price sits still. They share one OI fetch, so "both" costs no extra calls.
+  MODE: z.enum(["breakout", "premove", "both"]).default("breakout"),
+
+  // Scan window + gates (breakout)
   WINDOW_MINUTES: z.coerce.number().int().positive().default(60),
   MIN_VOLUME: z.coerce.number().nonnegative().default(10_000_000),
   MIN_OI_DELTA: z.coerce.number().default(5),
   MAX_PCHG_24H: z.coerce.number().default(40),
+
+  // Pre-move gates. A shorter window because the thesis is a fast OI commit,
+  // and a *maximum* price move because a name that already ran is not pre-move.
+  PREMOVE_WINDOW_MINUTES: z.coerce.number().int().positive().default(15),
+  PREMOVE_MIN_OI_DELTA: z.coerce.number().default(3),
+  PREMOVE_MAX_ABS_PCHG_WINDOW: z.coerce.number().positive().default(1.5),
+  PREMOVE_MIN_SCORE: z.coerce.number().default(0.35),
+
+  // Pre-move weights. Separate from the breakout set because the price term is
+  // inverted here — quiet is the signal, not movement.
+  PM_W_OI: z.coerce.number().default(0.4),
+  PM_W_VOL: z.coerce.number().default(0.15),
+  PM_W_QUIET: z.coerce.number().default(0.3),
 
   // Alerting
   ALERT_COOLDOWN_MIN: z.coerce.number().nonnegative().default(60),
@@ -60,6 +78,18 @@ const Schema = z.object({
   // gap in history silently turns a "1h" delta into a multi-hour one.
   SNAPSHOT_MAX_STALENESS_MIN: z.coerce.number().nonnegative().default(0),
 
+  // Record every alert and score it forward at +15m/+1h/+4h. Costs no extra
+  // API calls — later scans already carry the current price of everything.
+  TRACK_OUTCOMES: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
+  // How stale the snapshot backing a *price* window may be. 0 = auto
+  // (1.5 scan intervals, floor 5m). Tighter than the OI allowance because a
+  // 15m pre-move window is meaningless if the reference price is 30m old.
+  PRICE_REF_STALENESS_MIN: z.coerce.number().nonnegative().default(0),
+
   DB_PATH: z.string().default("./oi-scanner.db"),
   HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 });
@@ -83,6 +113,35 @@ export type Config = typeof config;
 export const snapshotStalenessMs =
   (config.SNAPSHOT_MAX_STALENESS_MIN ||
     Math.max(2 * config.SCAN_INTERVAL_MIN, 15)) * 60_000;
+
+/**
+ * Price references are held to a tighter clock than OI ones: the pre-move
+ * verdict is "price did not move", which a stale reference silently fakes.
+ */
+export const priceRefStalenessMs =
+  (config.PRICE_REF_STALENESS_MIN ||
+    Math.max(1.5 * config.SCAN_INTERVAL_MIN, 5)) * 60_000;
+
+/**
+ * The shortest window any active mode asks for. Scanning on a cadence coarser
+ * than half of it means the reference snapshot is routinely older than the
+ * window itself — the delta then measures a longer period than it reports.
+ */
+export function windowCadenceWarning(): string | null {
+  const shortest =
+    config.MODE === "breakout"
+      ? config.WINDOW_MINUTES
+      : config.MODE === "premove"
+        ? config.PREMOVE_WINDOW_MINUTES
+        : Math.min(config.WINDOW_MINUTES, config.PREMOVE_WINDOW_MINUTES);
+
+  if (config.SCAN_INTERVAL_MIN * 2 <= shortest) return null;
+  return (
+    `SCAN_INTERVAL_MIN=${config.SCAN_INTERVAL_MIN} is too coarse for a ` +
+    `${shortest}m window — set it to ${Math.floor(shortest / 2)} or less, ` +
+    `or window price changes will measure a longer period than they report.`
+  );
+}
 
 /** Telegram is only required when actually sending. */
 export function assertTelegramConfigured(): void {

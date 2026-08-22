@@ -17,11 +17,39 @@ db.exec(`
     ON snapshots (exchange, symbol, ts DESC);
 
   CREATE TABLE IF NOT EXISTS alert_state (
-    key             TEXT PRIMARY KEY,   -- base asset, e.g. "ARB"
+    key             TEXT PRIMARY KEY,   -- "<mode>:<direction>:<base>", e.g. "premove:long:ARB"
     last_alerted_ts INTEGER NOT NULL DEFAULT 0,
     in_bucket       INTEGER NOT NULL DEFAULT 0,
     exchanges       TEXT NOT NULL DEFAULT ''  -- venues covered by the last alert
   );
+
+  -- Every alert ever fired, with its entry price, scored forward in time.
+  -- This is what turns the thresholds from guesses into measurements: without
+  -- it there is no way to tell whether a factor earns its weight.
+  CREATE TABLE IF NOT EXISTS alert_outcomes (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            INTEGER NOT NULL,
+    mode          TEXT NOT NULL,
+    direction     TEXT NOT NULL,        -- long | short
+    base          TEXT NOT NULL,
+    exchanges     TEXT NOT NULL,
+    entry_price   REAL NOT NULL,
+    score         REAL NOT NULL,
+    oi_delta_pct  REAL NOT NULL,
+    px_window_pct REAL,
+    quote_vol_usd REAL NOT NULL,
+    funding_rate  REAL NOT NULL,
+    -- filled in by later scans, at zero API cost: the universe call already
+    -- carries the current price of everything we alerted on.
+    px_15m        REAL,
+    px_1h         REAL,
+    px_4h         REAL,
+    mfe_pct       REAL,                 -- max favourable excursion, signed for direction
+    mae_pct       REAL,                 -- max adverse excursion
+    last_check_ts INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_outcomes_open
+    ON alert_outcomes (ts) WHERE px_4h IS NULL;
 `);
 
 // Migrate databases created before venue tracking existed.
@@ -85,6 +113,25 @@ export function getSnapshotAtOrBefore(
     cutoffTs,
     cutoffTs - maxStalenessMs,
   ) as { oi: number; price: number; ts: number } | undefined;
+}
+
+/** Every snapshot from `sinceTs` onward, oldest first. */
+const selectSeries = db.prepare(
+  `SELECT ts, oi, price FROM snapshots
+   WHERE exchange = ? AND symbol = ? AND ts >= ?
+   ORDER BY ts ASC`,
+);
+
+export function getSnapshotSeries(
+  exchange: string,
+  symbol: string,
+  sinceTs: number,
+): { ts: number; oi: number; price: number }[] {
+  return selectSeries.all(exchange, symbol, sinceTs) as {
+    ts: number;
+    oi: number;
+    price: number;
+  }[];
 }
 
 /** Drop snapshots older than `days` so the file does not grow without bound. */

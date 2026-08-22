@@ -46,7 +46,9 @@ All market-data endpoints are public (no API key). Symbol naming: both Binance a
 ```
 src/
   config.ts          # env + thresholds, zod-validated
-  db.ts              # better-sqlite3: snapshots + alert cooldowns
+  modes.ts           # breakout + premove: gates, weights, classification
+  tracking.ts        # alert outcomes: mark-to-market + report
+  db.ts              # better-sqlite3: snapshots + cooldowns + outcomes
   exchanges/
     base.ts          # Exchange interface
     binance.ts
@@ -69,19 +71,23 @@ export interface Candidate {
   lastPrice: number;
   fundingRate: number;
 }
+export interface OiPoint { ts: number; oi: number; }
 export interface OiChange { oiNow: number; oiPrev: number; deltaPct: number | null; }
 
 export interface Exchange {
   name: string;
   getUniverse(): Promise<Candidate[]>;
-  getOiChange(symbol: string, windowMinutes: number): Promise<OiChange>;
+  // Returns the SERIES, not a single delta — one fetch answers every mode's
+  // window. Derive deltas with deltaOverWindow().
+  getOiHistory(symbol: string, lookbackMinutes: number): Promise<OiPoint[]>;
 }
 ```
 
 ### Flow (per scan)
 1. `getUniverse()` for each enabled exchange (one call each).
 2. Gate by `quoteVol24hUsd >= MIN_VOLUME` **before** fetching OI (cuts noise + API calls).
-3. Fetch `getOiChange` for survivors in parallel, bounded by `p-limit` (concurrency ~8).
+3. Fetch `getOiHistory` for survivors in parallel, bounded by `p-limit` (concurrency ~8).
+   One call per symbol at the deepest window any active mode needs — never one per mode.
 4. Normalize to **base asset** (strip `USDT`) and merge across exchanges — same base firing on >1 exchange is a stronger signal.
 5. Score, classify, apply cooldown, rank, format, send.
 
@@ -116,6 +122,52 @@ const cross   = Math.min(exchangesFiring - 1, 2) * 0.15;      // multi-exchange 
 score = 0.45*nOi + 0.20*nVol + 0.25*nPrice + cross - 0.15*funding;
 // Computed 0..1-ish (real range ~-0.15..1.20); displayed x100 as an integer.
 ```
+
+### Pre-move mode (`MODE=premove`)
+
+The inverted thesis: capital committing *before* price expands. Same pipeline,
+opposite price term.
+
+```ts
+// Gates (must pass):
+quoteVol24hUsd  >= MIN_VOLUME
+oiDeltaPct      >= PREMOVE_MIN_OI_DELTA           // e.g. 3, over a 15m window
+priceChgPctWindow !== null                        // "quiet" must be shown, not assumed
+|priceChgPctWindow| <= PREMOVE_MAX_ABS_PCHG_WINDOW // e.g. 1.5 - a MAXIMUM, not a minimum
+|priceChgPct24h| <= MAX_PCHG_24H
+score           >= PREMOVE_MIN_SCORE              // looser gates need a floor
+
+// Buckets: BOTH building regimes qualify - this mode calls shorts too.
+//   OI up & px up   -> "longs building"  -> long bias
+//   OI up & px down -> "shorts building" -> short bias
+
+// The term that flips: flat tape scores 1, moving tape scores 0.
+const quiet = 1 - clamp01(Math.abs(priceChgPctWindow) / PREMOVE_MAX_ABS_PCHG_WINDOW);
+
+score = 0.40*nOi + 0.15*nVol + 0.30*quiet + cross - 0.15*funding;
+```
+
+**Do not merge the two weight sets.** `breakout` rewards price movement and
+`premove` penalises it; a single scorer cannot express both. `MODE=both` runs
+them side by side off one shared OI fetch.
+
+Cooldown keys are `"<mode>:<direction>:<base>"` — a long and a short on the same
+coin are different claims and must not mute each other.
+
+---
+
+## Post-signal tracking
+
+Every alert lands in `alert_outcomes` with its entry price and is marked to
+market on later scans at +15m/+1h/+4h. **Zero API cost**: the universe call
+already carries the current price of every base ever alerted on.
+
+MFE/MAE are signed for the alert's direction, so a short that falls 3% records
++3 and long/short performance aggregate on one scale. `--report [days]` prints
+hit rates per mode and side.
+
+This exists so the thresholds are falsifiable. Tune weights against the report,
+not against whether the alerts look plausible.
 
 - OI delta carries the most weight — it's the fresh signal.
 - Volume is log-scaled so a $1B coin doesn't drown a $30M mover.
@@ -160,14 +212,27 @@ Without it, the same coin re-alerts every scan. Use SQLite (already present for 
 ```
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=          # @name or -100...
+MODE=breakout              # breakout | premove | both
 EXCHANGES=binance,bybit    # mexc,bitget once history accrues
 WINDOW_MINUTES=60
 MIN_VOLUME=10000000
 MIN_OI_DELTA=5
 MAX_PCHG_24H=40
 ALERT_COOLDOWN_MIN=60
-SCAN_INTERVAL_MIN=10
+SCAN_INTERVAL_MIN=10        # must be <= half the shortest active window
 CONCURRENCY=8
+
+# Pre-move only
+PREMOVE_WINDOW_MINUTES=15
+PREMOVE_MIN_OI_DELTA=3
+PREMOVE_MAX_ABS_PCHG_WINDOW=1.5
+PREMOVE_MIN_SCORE=0.35
+PM_W_OI=0.40
+PM_W_VOL=0.15
+PM_W_QUIET=0.30
+
+PRICE_REF_STALENESS_MIN=0   # 0 = auto (1.5 scan intervals, min 5m)
+TRACK_OUTCOMES=true
 ```
 
 ---
@@ -176,6 +241,7 @@ CONCURRENCY=8
 - `--once` — single scan, exit.
 - `--loop --interval <min>` — continuous (default 5–15 min).
 - `--dry-run` — console instead of Telegram.
+- `--report [days]` — how past alerts actually performed (default 30d).
 
 ---
 
@@ -184,3 +250,5 @@ CONCURRENCY=8
 - MEXC + Bitget get smarter the longer the worker runs (they start with null deltas).
 - Rate limits on market-data endpoints are generous, but batch universe calls (one per exchange) and bound the per-symbol OI fan-out with `p-limit`.
 - This is a **screener that surfaces candidates**, not a predictor — keep thresholds tunable and don't oversell any single signal.
+- A scan cadence coarser than half the shortest window silently stretches it: a 15m window polled every 10 min measures ~20m. The worker warns at boot.
+- Pre-move yields nothing on a cold database until price snapshots accrue. That is correct behaviour — it will not claim a tape is quiet without a reference.
