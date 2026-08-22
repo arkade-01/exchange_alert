@@ -7,18 +7,66 @@ current OI, so they need snapshot-and-diff history before they produce deltas).
 
 It is a **screener that surfaces candidates**, not a predictor.
 
+## Two modes
+
+| | `breakout` | `premove` |
+|---|---|---|
+| Shape | OI **and** price rising | OI rising, price **flat** |
+| Window | 60m | 15m |
+| Price term | rewards movement | rewards *stillness* |
+| Sides | longs only | longs **and** shorts |
+| Thesis | ride a move in progress | capital commits before price expands |
+
+The two are genuinely opposed — `breakout` ranks a name higher the more it has
+already moved, `premove` ranks it lower. That is why they are separate modes
+with separate weights rather than one scorer with extra factors.
+
+`MODE=both` runs them together. It costs **no additional API calls**: one OI
+history fetch per symbol is taken at the deepest window any active mode needs,
+and every mode derives its own window from that same series.
+
+Pre-move stays silent until price snapshots exist — it refuses to claim a tape
+is quiet without a reference to prove it. On a cold database that means no
+pre-move signals for the first couple of scans, which is correct, not broken.
+
 ## Local
 
 ```bash
 npm install
 cp .env.example .env      # fill in TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID
 npm run scan:dry          # one scan, prints the message, sends nothing
+npm run scan:premove      # one pre-move scan, dry
 npm run scan              # one scan, posts if there are signals
 npm run loop              # continuous, every SCAN_INTERVAL_MIN
+npm run report            # how past alerts actually performed
 npm test                  # runs against .test.db, never the real database
 ```
 
 `npm run loop -- --interval 15` overrides the interval without editing `.env`.
+
+**Set `SCAN_INTERVAL_MIN` to at most half your shortest window.** A 15m pre-move
+window polled every 10 minutes measures a ~20m period and reports it as 15m. The
+worker prints a warning at boot when the cadence is too coarse.
+
+## Measuring whether it works
+
+Every alert is written to `alert_outcomes` with its entry price, then marked to
+market on later scans at +15m, +1h and +4h. This costs nothing — the universe
+call already carries the current price of everything ever alerted on.
+
+```bash
+npm run report            # last 30 days
+npm run report -- 7       # last 7
+```
+
+```
+# shape of the output — these numbers are illustrative, not measured results
+mode      dir    n  settled   avgMFE   avgMAE    +1h     +4h   ≥1%  ≥2%  ≥5%
+premove   long  41       38   +2.14%   -1.03%  +0.62%  +0.94%   61%  38%   9%
+```
+
+MFE/MAE are signed for the alert's direction, so shorts and longs share one
+scale. Tune the weights against this table, not against how the alerts feel.
 
 ## Deploy (Railway)
 

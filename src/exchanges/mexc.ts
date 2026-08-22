@@ -3,10 +3,9 @@ import {
   toBase,
   type Candidate,
   type Exchange,
-  type OiChange,
 } from "./base.js";
 import { config } from "../config.js";
-import { makeSnapshotOiChange } from "./snapshot.js";
+import { makeSnapshotOiHistory } from "./snapshot.js";
 
 const BASE = config.MEXC_BASE_URL;
 
@@ -54,8 +53,5 @@ export const mexc: Exchange = {
     return out;
   },
 
-  getOiChange: makeSnapshotOiChange("mexc", () => latestOi) as (
-    symbol: string,
-    windowMinutes: number,
-  ) => Promise<OiChange>,
+  getOiHistory: makeSnapshotOiHistory("mexc", () => latestOi),
 };

@@ -12,7 +12,9 @@
     "scan:dry": "tsx src/index.ts --once --dry-run",
     "loop": "tsx src/index.ts --loop",
     "typecheck": "tsc --noEmit",
-    "test": "rm -f .test.db .test.db-wal .test.db-shm && DB_PATH=.test.db tsx test/cooldown.mts && DB_PATH=.test.db tsx test/snapshot.mts"
+    "test": "rm -f .test.db .test.db-wal .test.db-shm && DB_PATH=.test.db tsx test/modes.mts && DB_PATH=.test.db tsx test/cooldown.mts && DB_PATH=.test.db tsx test/snapshot.mts && DB_PATH=.test.db tsx test/tracking.mts",
+    "report": "tsx src/index.ts --report",
+    "scan:premove": "MODE=premove tsx src/index.ts --once --dry-run"
   },
   "engines": {
     "node": ">=22"

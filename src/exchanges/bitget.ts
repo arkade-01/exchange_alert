@@ -3,10 +3,9 @@ import {
   toBase,
   type Candidate,
   type Exchange,
-  type OiChange,
 } from "./base.js";
 import { config } from "../config.js";
-import { makeSnapshotOiChange } from "./snapshot.js";
+import { makeSnapshotOiHistory } from "./snapshot.js";
 
 const BASE = config.BITGET_BASE_URL;
 
@@ -56,8 +55,5 @@ export const bitget: Exchange = {
     return out;
   },
 
-  getOiChange: makeSnapshotOiChange("bitget", () => latestOi) as (
-    symbol: string,
-    windowMinutes: number,
-  ) => Promise<OiChange>,
+  getOiHistory: makeSnapshotOiHistory("bitget", () => latestOi),
 };

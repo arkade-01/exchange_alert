@@ -1,8 +1,9 @@
-import { config } from "./config.js";
+import { config, windowCadenceWarning } from "./config.js";
 import { hasAlertHistory } from "./db.js";
 import { installDnsOverride } from "./net.js";
 import { commitAlerts, formatMessage, scan } from "./scanner.js";
 import { sendMessage } from "./telegram.js";
+import { formatReport, outcomeStats } from "./tracking.js";
 
 // Must run before the first request goes out.
 installDnsOverride();
@@ -11,6 +12,7 @@ interface Args {
   once: boolean;
   loop: boolean;
   dryRun: boolean;
+  report: number | null; // lookback in days
   intervalMin: number;
 }
 
@@ -19,8 +21,10 @@ function parseArgs(argv: string[]): Args {
     once: argv.includes("--once"),
     loop: argv.includes("--loop"),
     dryRun: argv.includes("--dry-run"),
+    report: null,
     intervalMin: config.SCAN_INTERVAL_MIN,
   };
+
   const i = argv.indexOf("--interval");
   if (i !== -1) {
     const v = Number(argv[i + 1]);
@@ -29,7 +33,14 @@ function parseArgs(argv: string[]): Args {
     }
     args.intervalMin = v;
   }
-  if (!args.once && !args.loop) args.once = true; // default to a single scan
+
+  const r = argv.indexOf("--report");
+  if (r !== -1) {
+    const v = Number(argv[r + 1]);
+    args.report = Number.isFinite(v) && v > 0 ? v : 30;
+  }
+
+  if (!args.once && !args.loop && args.report === null) args.once = true;
   return args;
 }
 
@@ -41,44 +52,59 @@ function parseArgs(argv: string[]): Args {
 async function runOnce(dryRun: boolean, prime = false): Promise<void> {
   const result = await scan();
   const s = result.stats;
+  const totalAlerts = result.modes.reduce((n, m) => n + m.alerts.length, 0);
 
   console.error(
     `[${result.scannedAt.toISOString()}] universe ${s.universe} → vol gate ${s.afterVolumeGate} → ` +
-      `oi ${s.oiFetched} (${s.nullDeltas} null) → longs building ${s.longsBuilding} → ` +
-      `${s.merged} bases → ${result.alerts.length} alerts, ${result.suppressed.length} on cooldown`,
+      `oi ${s.oiFetched} (${s.nullDeltas} null) · ${s.tracked} tracked`,
   );
+  for (const m of result.modes) {
+    console.error(
+      `  ${m.mode.name.padEnd(8)} bucket ${m.bucketCount} → ` +
+        `${m.alerts.length} alert(s), ${m.suppressed.length} on cooldown, ` +
+        `${m.belowScore} below score floor`,
+    );
+  }
   if (s.errors.length) {
     console.error(`  ${s.errors.length} error(s); first 3:`);
     for (const e of s.errors.slice(0, 3)) console.error(`    ${e}`);
   }
 
-  const message = formatMessage(result);
   if (dryRun) {
-    console.log(message);
+    console.log(formatMessage(result, true));
     return;
   }
-  if (result.alerts.length === 0) return; // stay quiet when there is nothing to say
+  if (totalAlerts === 0) return; // stay quiet when there is nothing to say
 
   if (prime) {
     console.error(
-      `  priming: ${result.alerts.length} alert(s) recorded, not sent ` +
+      `  priming: ${totalAlerts} alert(s) recorded, not sent ` +
         `(no alert history — treating this scan as the baseline)`,
     );
     commitAlerts(result);
     return;
   }
 
-  await sendMessage(message);
+  await sendMessage(formatMessage(result));
   commitAlerts(result);
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  if (args.report !== null) {
+    console.log(formatReport(outcomeStats(args.report), args.report));
+    if (!args.once && !args.loop) return;
+  }
+
   console.error(
-    `OI scanner · exchanges=${config.EXCHANGES.join(",")} · window=${config.WINDOW_MINUTES}m · ` +
-      `minVol=${config.MIN_VOLUME} · minOi=${config.MIN_OI_DELTA}%` +
+    `OI scanner · mode=${config.MODE} · exchanges=${config.EXCHANGES.join(",")} · ` +
+      `minVol=${config.MIN_VOLUME}` +
       (args.dryRun ? " · DRY RUN" : ""),
   );
+
+  const warning = windowCadenceWarning();
+  if (warning) console.error(`⚠️  ${warning}`);
 
   if (!args.loop) {
     await runOnce(args.dryRun);

@@ -1,11 +1,10 @@
 import {
   getJson,
-  pctChange,
   pickPeriod,
   toBase,
   type Candidate,
   type Exchange,
-  type OiChange,
+  type OiPoint,
 } from "./base.js";
 import { config } from "../config.js";
 
@@ -73,21 +72,20 @@ export const bybit: Exchange = {
       .filter((c) => Number.isFinite(c.quoteVol24hUsd) && c.lastPrice > 0);
   },
 
-  async getOiChange(symbol: string, windowMinutes: number): Promise<OiChange> {
-    const { period, limit } = pickPeriod(INTERVALS, windowMinutes, 200);
+  async getOiHistory(
+    symbol: string,
+    lookbackMinutes: number,
+  ): Promise<OiPoint[]> {
+    const { period, limit } = pickPeriod(INTERVALS, lookbackMinutes, 200);
     const result = await bybitGet<{ list: OiRow[] }>(
       `/v5/market/open-interest?category=linear&symbol=${symbol}&intervalTime=${period}&limit=${limit}`,
     );
-    if (!result.list || result.list.length < 2) {
-      return { oiNow: 0, oiPrev: 0, deltaPct: null };
-    }
+    if (!result.list) return [];
 
     // Bybit returns newest-first — sorting is mandatory, not defensive.
-    const sorted = [...result.list].sort(
-      (a, b) => Number(a.timestamp) - Number(b.timestamp),
-    );
-    const oiPrev = Number(sorted[0]!.openInterest);
-    const oiNow = Number(sorted[sorted.length - 1]!.openInterest);
-    return { oiNow, oiPrev, deltaPct: pctChange(oiPrev, oiNow) };
+    return result.list
+      .map((r) => ({ ts: Number(r.timestamp), oi: Number(r.openInterest) }))
+      .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.oi))
+      .sort((a, b) => a.ts - b.ts);
   },
 };

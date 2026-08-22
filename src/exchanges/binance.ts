@@ -1,11 +1,10 @@
 import {
   getJson,
-  pctChange,
   pickPeriod,
   toBase,
   type Candidate,
   type Exchange,
-  type OiChange,
+  type OiPoint,
 } from "./base.js";
 import { config } from "../config.js";
 
@@ -71,18 +70,20 @@ export const binance: Exchange = {
       .filter((c) => Number.isFinite(c.quoteVol24hUsd) && c.lastPrice > 0);
   },
 
-  async getOiChange(symbol: string, windowMinutes: number): Promise<OiChange> {
-    const { period, limit } = pickPeriod(PERIODS, windowMinutes, 500);
+  async getOiHistory(
+    symbol: string,
+    lookbackMinutes: number,
+  ): Promise<OiPoint[]> {
+    const { period, limit } = pickPeriod(PERIODS, lookbackMinutes, 500);
     const points = await getJson<OiHistPoint[]>(
       `${BASE}/futures/data/openInterestHist?symbol=${symbol}&period=${period}&limit=${limit}`,
     );
-    if (points.length < 2) return { oiNow: 0, oiPrev: 0, deltaPct: null };
 
-    // Documented ascending, but sort defensively — the delta depends on it.
-    const sorted = [...points].sort((a, b) => a.timestamp - b.timestamp);
-    // USD notional, so cross-symbol comparisons stay meaningful.
-    const oiPrev = Number(sorted[0]!.sumOpenInterestValue);
-    const oiNow = Number(sorted[sorted.length - 1]!.sumOpenInterestValue);
-    return { oiNow, oiPrev, deltaPct: pctChange(oiPrev, oiNow) };
+    // Documented ascending, but sort defensively — every delta depends on it.
+    // sumOpenInterestValue is USD notional, so cross-symbol comparisons hold.
+    return points
+      .map((p) => ({ ts: Number(p.timestamp), oi: Number(p.sumOpenInterestValue) }))
+      .filter((p) => Number.isFinite(p.ts) && Number.isFinite(p.oi))
+      .sort((a, b) => a.ts - b.ts);
   },
 };

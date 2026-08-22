@@ -1,5 +1,5 @@
 import pLimit from "p-limit";
-import { config, snapshotStalenessMs } from "./config.js";
+import { config, priceRefStalenessMs } from "./config.js";
 import {
   getAlertState,
   getSnapshotAtOrBefore,
@@ -9,28 +9,42 @@ import {
   syncBucketMembership,
   type SnapshotRow,
 } from "./db.js";
-import { pctChange, type Candidate, type Exchange } from "./exchanges/base.js";
+import {
+  deltaOverWindow,
+  pctChange,
+  type Candidate,
+  type Exchange,
+  type OiPoint,
+} from "./exchanges/base.js";
 import { resolveExchanges } from "./exchanges/index.js";
+import {
+  activeModes,
+  classify,
+  directionOf,
+  maxLookbackMinutes,
+  type Classification,
+  type Direction,
+  type Mode,
+  type ModeName,
+} from "./modes.js";
+import { markToMarket, recordOutcomes } from "./tracking.js";
 
-export type Classification =
-  | "longs building"
-  | "shorts building"
-  | "short covering"
-  | "longs closing"
-  | "flat";
+export type { Classification } from "./modes.js";
 
-/** One (exchange, symbol) that cleared the volume gate and got an OI reading. */
+/** One (exchange, symbol) evaluated against one mode's window. */
 export interface Signal extends Candidate {
   oiNow: number;
   oiPrev: number;
   oiDeltaPct: number;
-  /** Price change across the scan window, from snapshots; null before history exists. */
+  /** Price change across this mode's window, from snapshots; null before history exists. */
   priceChgPctWindow: number | null;
   classification: Classification;
 }
 
 /** Signals for one base asset, merged across every exchange it fired on. */
 export interface MergedSignal {
+  mode: ModeName;
+  direction: Direction;
   base: string;
   exchanges: string[];
   oiDeltaPct: number; // strongest across exchanges
@@ -48,78 +62,49 @@ export interface MergedSignal {
   confirmedOn: string[];
 }
 
-export interface ScanResult {
-  windowMinutes: number;
-  scannedAt: Date;
+export interface ModeResult {
+  mode: Mode;
   alerts: MergedSignal[];
   /** Cleared every gate but suppressed by the cooldown rule. */
   suppressed: MergedSignal[];
+  /** Passed the gates before merging — the size of the raw bucket. */
+  bucketCount: number;
+  /** Dropped for scoring below the mode's floor. */
+  belowScore: number;
+}
+
+export interface ScanResult {
+  scannedAt: Date;
+  modes: ModeResult[];
   stats: {
     universe: number;
     afterVolumeGate: number;
     oiFetched: number;
     nullDeltas: number;
-    longsBuilding: number;
-    merged: number;
+    tracked: number;
     errors: string[];
   };
 }
 
-const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+/** Cooldown state is per mode *and* side — a long and a short on the same base
+ *  are different claims and must not mute each other. */
+const alertKey = (m: { mode: ModeName; direction: Direction; base: string }) =>
+  `${m.mode}:${m.direction}:${m.base}`;
 
-function classify(oiDelta: number, priceDelta: number): Classification {
-  if (oiDelta === 0 || priceDelta === 0) return "flat";
-  if (oiDelta > 0) return priceDelta > 0 ? "longs building" : "shorts building";
-  return priceDelta > 0 ? "short covering" : "longs closing";
-}
-
-/**
- * Composite rank for the longs-building bucket. OI carries the most weight —
- * it is the fresh signal; volume is log-scaled so a $1B name does not drown a
- * $30M mover; funding is a crowding penalty. Every constant is in config.
- */
-export function scoreSignal(s: {
-  oiDeltaPct: number;
-  quoteVol24hUsd: number;
-  priceChgPct24h: number;
-  priceChgPctWindow: number | null;
-  fundingRate: number;
-  exchangesFiring: number;
-}): number {
-  const nOi = clamp01(s.oiDeltaPct / config.NORM_OI_MAX);
-  const nVol = clamp01(
-    Math.log10(Math.max(s.quoteVol24hUsd, 1) / config.NORM_VOL_FLOOR) /
-      config.NORM_VOL_DECADES,
-  );
-  // Prefer the window move; fall back to the 24h move on a wider scale.
-  const nPrice =
-    s.priceChgPctWindow !== null
-      ? clamp01(s.priceChgPctWindow / config.NORM_PRICE_WINDOW_MAX)
-      : clamp01(s.priceChgPct24h / config.NORM_PRICE_24H_MAX);
-  const funding = clamp01(Math.abs(s.fundingRate) / config.NORM_FUNDING_MAX);
-  const cross =
-    Math.min(s.exchangesFiring - 1, config.CROSS_BONUS_MAX_EXTRA) *
-    config.CROSS_BONUS;
-
-  return (
-    config.W_OI * nOi +
-    config.W_VOL * nVol +
-    config.W_PRICE * nPrice +
-    cross -
-    config.W_FUNDING * funding
-  );
-}
-
-function mergeByBase(signals: Signal[]): MergedSignal[] {
+function mergeByBase(mode: Mode, signals: Signal[]): MergedSignal[] {
   const groups = new Map<string, Signal[]>();
   for (const s of signals) {
-    const list = groups.get(s.base);
+    const dir = directionOf(s.classification);
+    if (!dir) continue;
+    const key = `${dir}|${s.base}`;
+    const list = groups.get(key);
     if (list) list.push(s);
-    else groups.set(s.base, [s]);
+    else groups.set(key, [s]);
   }
 
   const merged: MergedSignal[] = [];
-  for (const [base, list] of groups) {
+  for (const [key, list] of groups) {
+    const direction = key.split("|")[0] as Direction;
     // Representative = the exchange showing the strongest OI build.
     const lead = list.reduce((a, b) => (b.oiDeltaPct > a.oiDeltaPct ? b : a));
     const quoteVol = list.reduce((sum, s) => sum + s.quoteVol24hUsd, 0);
@@ -130,7 +115,9 @@ function mergeByBase(signals: Signal[]): MergedSignal[] {
         : lead.fundingRate;
 
     merged.push({
-      base,
+      mode: mode.name,
+      direction,
+      base: lead.base,
       exchanges: [...new Set(list.map((s) => s.exchange))],
       oiDeltaPct: lead.oiDeltaPct,
       quoteVol24hUsd: quoteVol,
@@ -144,7 +131,7 @@ function mergeByBase(signals: Signal[]): MergedSignal[] {
   }
 
   for (const m of merged) {
-    m.score = scoreSignal({ ...m, exchangesFiring: m.exchanges.length });
+    m.score = mode.score({ ...m, exchangesFiring: m.exchanges.length });
   }
   return merged;
 }
@@ -165,7 +152,7 @@ export function applyCooldown(merged: MergedSignal[], now: number) {
   const suppressed: MergedSignal[] = [];
 
   for (const m of merged) {
-    const state = getAlertState(m.base);
+    const state = getAlertState(alertKey(m));
     const isNew = !state || state.in_bucket === 0;
     const cooled = state ? now - state.last_alerted_ts >= cooldownMs : true;
 
@@ -192,13 +179,13 @@ export function applyCooldown(merged: MergedSignal[], now: number) {
   return { alerts, suppressed };
 }
 
-export async function scan(
-  windowMinutes = config.WINDOW_MINUTES,
-): Promise<ScanResult> {
+export async function scan(): Promise<ScanResult> {
   const scannedAt = new Date();
   const now = scannedAt.getTime();
   const errors: string[] = [];
   const exchanges: Exchange[] = resolveExchanges(config.EXCHANGES);
+  const modes = activeModes();
+  const lookback = maxLookbackMinutes(modes);
 
   // 1. One universe call per exchange, in parallel. A dead exchange must not
   //    take down the scan.
@@ -224,40 +211,19 @@ export async function scan(
   }));
   const afterVolumeGate = gated.reduce((n, g) => n + g.candidates.length, 0);
 
-  // 3. Bounded parallel OI fetch for the survivors.
+  // 3. Bounded parallel OI fetch — ONE call per symbol at the deepest lookback
+  //    any active mode needs. Every mode's window is then derived from the same
+  //    series, so running both modes costs no extra requests.
   const limit = pLimit(config.CONCURRENCY);
-  const cutoff = now - windowMinutes * 60_000;
-  const signals: Signal[] = [];
-  let nullDeltas = 0;
+  const series: { ex: Exchange; c: Candidate; points: OiPoint[] }[] = [];
 
   await Promise.all(
     gated.flatMap(({ ex, candidates }) =>
       candidates.map((c) =>
         limit(async () => {
           try {
-            const oi = await ex.getOiChange(c.symbol, windowMinutes);
-            if (oi.deltaPct === null) {
-              nullDeltas++;
-              return;
-            }
-            const prevSnap = getSnapshotAtOrBefore(
-              ex.name,
-              c.symbol,
-              cutoff,
-              snapshotStalenessMs,
-            );
-            const priceChgPctWindow = prevSnap
-              ? pctChange(prevSnap.price, c.lastPrice)
-              : null;
-            const priceDir = priceChgPctWindow ?? c.priceChgPct24h;
-            signals.push({
-              ...c,
-              oiNow: oi.oiNow,
-              oiPrev: oi.oiPrev,
-              oiDeltaPct: oi.deltaPct,
-              priceChgPctWindow,
-              classification: classify(oi.deltaPct, priceDir),
-            });
+            const points = await ex.getOiHistory(c.symbol, lookback);
+            if (points.length) series.push({ ex, c, points });
           } catch (err) {
             errors.push(`${ex.name} ${c.symbol}: ${(err as Error).message}`);
           }
@@ -267,61 +233,142 @@ export async function scan(
   );
 
   // 4. Persist this poll. Feeds MEXC/Bitget deltas and the window price change
-  //    for every exchange on the next run.
+  //    for every exchange on the next run. Exchanges whose universe call omits
+  //    OI (Binance) get it from the history fetch, so they are not left out of
+  //    the snapshot table — without this their window price change is always null.
   const rows: SnapshotRow[] = [];
-  for (const { ex, candidates } of gated) {
-    for (const c of candidates) {
-      const oi = c.openInterest;
-      if (oi === undefined || !Number.isFinite(oi)) continue;
-      rows.push({
-        exchange: ex.name,
-        symbol: c.symbol,
-        ts: now,
-        oi,
-        price: c.lastPrice,
-      });
-    }
+  for (const { ex, c, points } of series) {
+    const oi = c.openInterest ?? points[points.length - 1]?.oi;
+    if (oi === undefined || !Number.isFinite(oi)) continue;
+    rows.push({
+      exchange: ex.name,
+      symbol: c.symbol,
+      ts: now,
+      oi,
+      price: c.lastPrice,
+    });
   }
   recordSnapshots(rows);
   pruneSnapshots();
 
-  // 5. Remaining gates, then merge by base asset across exchanges.
-  const bucket = signals.filter(
-    (s) =>
-      s.oiDeltaPct >= config.MIN_OI_DELTA &&
-      s.priceChgPct24h <= config.MAX_PCHG_24H &&
-      s.classification === "longs building",
-  );
+  // 5. Evaluate each mode against the shared series.
+  let nullDeltas = 0;
+  const modeResults: ModeResult[] = [];
 
-  const merged = mergeByBase(bucket).sort((a, b) => b.score - a.score);
+  for (const mode of modes) {
+    const cutoff = now - mode.windowMinutes * 60_000;
+    const bucket: Signal[] = [];
 
-  // 6. Cooldown + dedup.
-  const { alerts, suppressed } = applyCooldown(merged, now);
-  syncBucketMembership(merged.map((m) => m.base));
+    for (const { ex, c, points } of series) {
+      const oi = deltaOverWindow(points, mode.windowMinutes, now);
+      if (oi.deltaPct === null) {
+        nullDeltas++;
+        continue;
+      }
+
+      const prevSnap = getSnapshotAtOrBefore(
+        ex.name,
+        c.symbol,
+        cutoff,
+        priceRefStalenessMs,
+      );
+      const priceChgPctWindow = prevSnap
+        ? pctChange(prevSnap.price, c.lastPrice)
+        : null;
+
+      // Direction comes from the window move when we have it. Falling back to
+      // the 24h move would classify a name on a move that already finished.
+      const priceDir = priceChgPctWindow ?? c.priceChgPct24h;
+      const classification = classify(oi.deltaPct, priceDir);
+
+      if (oi.deltaPct < mode.minOiDelta) continue;
+      if (!mode.accepts(classification)) continue;
+      if (!mode.admits({ priceChgPct24h: c.priceChgPct24h, priceChgPctWindow }))
+        continue;
+
+      bucket.push({
+        ...c,
+        oiNow: oi.oiNow,
+        oiPrev: oi.oiPrev,
+        oiDeltaPct: oi.deltaPct,
+        priceChgPctWindow,
+        classification,
+      });
+    }
+
+    const merged = mergeByBase(mode, bucket);
+    const ranked = merged
+      .filter((m) => m.score >= mode.minScore)
+      .sort((a, b) => b.score - a.score);
+    const belowScore = merged.length - ranked.length;
+
+    const { alerts, suppressed } = applyCooldown(ranked, now);
+    syncBucketMembership(ranked.map((m) => alertKey(m)));
+
+    modeResults.push({
+      mode,
+      alerts: alerts.slice(0, config.MAX_ALERTS),
+      suppressed,
+      bucketCount: bucket.length,
+      belowScore,
+    });
+  }
+
+  // 6. Mark open alerts to market. The universe already carries every current
+  //    price, so scoring past signals forward costs nothing.
+  let tracked = 0;
+  if (config.TRACK_OUTCOMES) {
+    const prices = new Map<string, number>();
+    for (const { candidates } of gated) {
+      for (const c of candidates) {
+        if (c.lastPrice > 0) prices.set(c.base, c.lastPrice);
+      }
+    }
+    tracked = markToMarket(prices, now);
+  }
 
   return {
-    windowMinutes,
     scannedAt,
-    alerts: alerts.slice(0, config.MAX_ALERTS),
-    suppressed,
+    modes: modeResults,
     stats: {
       universe: universeCount,
       afterVolumeGate,
-      oiFetched: signals.length,
+      oiFetched: series.length,
       nullDeltas,
-      longsBuilding: bucket.length,
-      merged: merged.length,
+      tracked,
       errors,
     },
   };
 }
 
-/** Commit the cooldown timestamps — only after a send actually succeeds. */
+/** Commit cooldowns and record outcomes — only after a send actually succeeds. */
 export function commitAlerts(result: ScanResult): void {
+  const ts = result.scannedAt.getTime();
+  const all = result.modes.flatMap((m) => m.alerts);
+  if (!all.length) return;
+
   recordAlerted(
-    result.alerts.map((a) => ({ key: a.base, exchanges: a.exchanges })),
-    result.scannedAt.getTime(),
+    all.map((a) => ({ key: alertKey(a), exchanges: a.exchanges })),
+    ts,
   );
+
+  if (config.TRACK_OUTCOMES) {
+    recordOutcomes(
+      all.map((a) => ({
+        mode: a.mode,
+        direction: a.direction,
+        base: a.base,
+        exchanges: a.exchanges,
+        entryPrice: a.lastPrice,
+        score: a.score,
+        oiDeltaPct: a.oiDeltaPct,
+        pxWindowPct: a.priceChgPctWindow,
+        quoteVolUsd: a.quoteVol24hUsd,
+        fundingRate: a.fundingRate,
+      })),
+      ts,
+    );
+  }
 }
 
 // ---- message formatting -----------------------------------------------------
@@ -348,20 +395,29 @@ function fmtUsd(v: number): string {
 
 const sign = (v: number) => (v >= 0 ? "+" : "");
 
-export function formatMessage(result: ScanResult): string {
-  const { alerts, windowMinutes, scannedAt } = result;
+/** TradingView deep link for the venue showing the strongest build. */
+function chartUrl(a: MergedSignal): string {
+  const venue = (a.exchanges[0] ?? "binance").toUpperCase();
+  return `https://www.tradingview.com/chart/?symbol=${venue}:${a.base}USDT.P`;
+}
+
+export function formatModeMessage(
+  result: ModeResult,
+  scannedAt: Date,
+): string {
+  const { mode, alerts } = result;
   const time = scannedAt.toISOString().slice(11, 16);
-  const win = fmtWindow(windowMinutes);
+  const win = fmtWindow(mode.windowMinutes);
 
   if (alerts.length === 0) {
     return (
-      `⚪️ <b>OI Scanner</b> — no signals · ${win} window\n` +
+      `⚪️ <b>${mode.label}</b> — no signals · ${win} window\n` +
       `<i>${time} UTC</i>`
     );
   }
 
   const header =
-    `🟢 <b>OI Scanner</b> — ${alerts.length} signal${alerts.length === 1 ? "" : "s"} · ${win} window\n` +
+    `${mode.emoji} <b>${mode.label}</b> — ${alerts.length} signal${alerts.length === 1 ? "" : "s"} · ${win} window\n` +
     `<i>${time} UTC</i>\n`;
 
   const lines = alerts.map((a, i) => {
@@ -379,12 +435,32 @@ export function formatMessage(result: ScanResult): string {
       ? `  ⚡ <b>confirmed on ${a.confirmedOn.map((e) => EXCHANGE_LABEL[e] ?? e).join(", ")}</b>`
       : "";
 
+    // Pre-move leads with the side, since it calls shorts as well as longs.
+    const bias =
+      mode.name === "premove"
+        ? `${a.direction === "long" ? "📈 long" : "📉 short"} bias · `
+        : "";
+    const regime =
+      a.direction === "long" ? "longs building" : "shorts building";
+
     return (
-      `<b>${i + 1}. ${a.base}</b>  score ${Math.round(a.score * 100)}${confirm}\n` +
+      `<b>${i + 1}. <a href="${chartUrl(a)}">${a.base}</a></b>  score ${Math.round(a.score * 100)}${confirm}\n` +
       `  OI <b>${sign(a.oiDeltaPct)}${a.oiDeltaPct.toFixed(1)}%</b> · px ${px} · vol ${fmtUsd(a.quoteVol24hUsd)}\n` +
-      `  longs building · ${venues} · funding ${funding}`
+      `  ${bias}${regime} · ${venues} · funding ${funding}`
     );
   });
 
   return `${header}\n${lines.join("\n\n")}`;
+}
+
+/** Every mode's message, joined. Modes with nothing to say stay silent. */
+export function formatMessage(result: ScanResult, includeEmpty = false): string {
+  const parts = result.modes
+    .filter((m) => includeEmpty || m.alerts.length > 0)
+    .map((m) => formatModeMessage(m, result.scannedAt));
+
+  if (!parts.length && includeEmpty) {
+    return formatModeMessage(result.modes[0]!, result.scannedAt);
+  }
+  return parts.join("\n\n");
 }
