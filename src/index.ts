@@ -13,6 +13,7 @@ interface Args {
   loop: boolean;
   dryRun: boolean;
   report: number | null; // lookback in days
+  send: boolean; // deliver the report to Telegram instead of stdout
   intervalMin: number;
 }
 
@@ -22,6 +23,7 @@ function parseArgs(argv: string[]): Args {
     loop: argv.includes("--loop"),
     dryRun: argv.includes("--dry-run"),
     report: null,
+    send: argv.includes("--send"),
     intervalMin: config.SCAN_INTERVAL_MIN,
   };
 
@@ -93,7 +95,20 @@ async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
   if (args.report !== null) {
-    console.log(formatReport(outcomeStats(args.report), args.report));
+    const text = formatReport(outcomeStats(args.report), args.report);
+    console.log(text);
+    if (args.send) {
+      // Never fall back to TELEGRAM_CHAT_ID: that is the alert channel, and a
+      // performance report is not something its subscribers asked for.
+      if (!config.TELEGRAM_REPORT_CHAT_ID) {
+        throw new Error(
+          "--send needs TELEGRAM_REPORT_CHAT_ID (your own chat id). " +
+            "It is deliberately separate from the alert channel.",
+        );
+      }
+      await sendMessage(`<pre>${text}</pre>`, config.TELEGRAM_REPORT_CHAT_ID);
+      console.error("report sent");
+    }
     if (!args.once && !args.loop) return;
   }
 

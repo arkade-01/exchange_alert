@@ -7,6 +7,10 @@ const csv = (s: string) =>
 const Schema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().default(""),
   TELEGRAM_CHAT_ID: z.string().default(""),
+  // Where `--report --send` delivers. Deliberately separate: performance
+  // reports are for you, not for the alert channel's subscribers. Unset means
+  // reports are never sent anywhere, only printed.
+  TELEGRAM_REPORT_CHAT_ID: z.string().default(""),
   EXCHANGES: z.string().default("binance,bybit").transform(csv),
 
   // Which scan modes run. "breakout" is the original behaviour (OI and price

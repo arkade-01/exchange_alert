@@ -28,6 +28,12 @@ import {
   type ModeName,
 } from "./modes.js";
 import { markToMarket, recordOutcomes } from "./tracking.js";
+import {
+  EMPTY_FEATURES,
+  fetchBaseline,
+  oiShape,
+  type AlertFeatures,
+} from "./features.js";
 
 export type { Classification } from "./modes.js";
 
@@ -39,6 +45,9 @@ export interface Signal extends Candidate {
   /** Price change across this mode's window, from snapshots; null before history exists. */
   priceChgPctWindow: number | null;
   classification: Classification;
+  /** Shape of the OI build — see features.ts. Free; derived from the series. */
+  oiConcentration: number | null;
+  impulseAgeMin: number | null;
 }
 
 /** Signals for one base asset, merged across every exchange it fired on. */
@@ -54,6 +63,8 @@ export interface MergedSignal {
   fundingRate: number; // volume-weighted
   lastPrice: number;
   score: number;
+  /** Context captured at alert time so the outcome can be explained later. */
+  features: AlertFeatures;
   /**
    * Venues added since this base was last alerted. Non-empty means a second
    * exchange confirmed an existing signal — that breaks the cooldown, because
@@ -126,6 +137,13 @@ function mergeByBase(mode: Mode, signals: Signal[]): MergedSignal[] {
       fundingRate,
       lastPrice: lead.lastPrice,
       score: 0,
+      // Baseline volatility needs a network call and is filled in later, for
+      // alerts only — there is no point fetching it for a name we suppress.
+      features: {
+        ...EMPTY_FEATURES,
+        oiConcentration: lead.oiConcentration,
+        impulseAgeMin: lead.impulseAgeMin,
+      },
       confirmedOn: [],
     });
   }
@@ -286,8 +304,11 @@ export async function scan(): Promise<ScanResult> {
       if (!mode.admits({ priceChgPct24h: c.priceChgPct24h, priceChgPctWindow }))
         continue;
 
+      const shape = oiShape(points, mode.windowMinutes, now);
       bucket.push({
         ...c,
+        oiConcentration: shape.concentration,
+        impulseAgeMin: shape.impulseAgeMin,
         oiNow: oi.oiNow,
         oiPrev: oi.oiPrev,
         oiDeltaPct: oi.deltaPct,
@@ -314,7 +335,23 @@ export async function scan(): Promise<ScanResult> {
     });
   }
 
-  // 6. Mark open alerts to market. The universe already carries every current
+  // 6. Baseline volatility for the alerts we are actually sending. One call
+  //    each, a handful per scan — never for the whole universe. Without it a
+  //    return is uncomparable across coins: +0.8% is a strong hour on a quiet
+  //    name and noise on a violent one.
+  if (config.TRACK_OUTCOMES) {
+    const firing = modeResults.flatMap((m) => m.alerts);
+    await Promise.all(
+      firing.map((a) =>
+        limit(async () => {
+          const base = await fetchBaseline(`${a.base}USDT`);
+          a.features = { ...a.features, ...base };
+        }),
+      ),
+    );
+  }
+
+  // 7. Mark open alerts to market. The universe already carries every current
   //    price, so scoring past signals forward costs nothing.
   let tracked = 0;
   if (config.TRACK_OUTCOMES) {
@@ -365,6 +402,7 @@ export function commitAlerts(result: ScanResult): void {
         pxWindowPct: a.priceChgPctWindow,
         quoteVolUsd: a.quoteVol24hUsd,
         fundingRate: a.fundingRate,
+        features: a.features,
       })),
       ts,
     );

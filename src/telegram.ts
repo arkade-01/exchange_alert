@@ -24,7 +24,10 @@ export function chunk(text: string, limit = TELEGRAM_LIMIT): string[] {
   return chunks;
 }
 
-export async function sendMessage(text: string): Promise<void> {
+export async function sendMessage(
+  text: string,
+  chatId = config.TELEGRAM_CHAT_ID,
+): Promise<void> {
   assertTelegramConfigured();
   const url = `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendMessage`;
 
@@ -33,7 +36,7 @@ export async function sendMessage(text: string): Promise<void> {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        chat_id: config.TELEGRAM_CHAT_ID,
+        chat_id: chatId,
         text: part,
         parse_mode: "HTML",
         disable_web_page_preview: true,

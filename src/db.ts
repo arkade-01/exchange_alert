@@ -41,6 +41,13 @@ db.exec(`
     funding_rate  REAL NOT NULL,
     -- filled in by later scans, at zero API cost: the universe call already
     -- carries the current price of everything we alerted on.
+    -- Features captured AT ALERT TIME, so outcomes can be sliced by them later.
+    -- These cannot be backfilled: the OI series that produced a given alert is
+    -- not reconstructible after the fact.
+    baseline_vol_pct REAL,             -- coin's median |1h move| over ~20d
+    oi_concentration REAL,             -- largest bucket's share of the OI rise, 0..1
+    vol_ratio        REAL,             -- volume at alert vs its own median hour
+    impulse_age_min  REAL,             -- minutes from the biggest OI jump to the alert
     px_15m        REAL,
     px_1h         REAL,
     px_4h         REAL,
@@ -51,6 +58,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_outcomes_open
     ON alert_outcomes (ts) WHERE px_4h IS NULL;
 `);
+
+// Add outcome feature columns to databases created before they existed. The
+// rows already written keep NULLs — the report treats those as unsliceable
+// rather than guessing values it cannot recover.
+{
+  const cols = db.prepare(`PRAGMA table_info(alert_outcomes)`).all() as {
+    name: string;
+  }[];
+  const have = new Set(cols.map((c) => c.name));
+  for (const col of [
+    "baseline_vol_pct",
+    "oi_concentration",
+    "vol_ratio",
+    "impulse_age_min",
+  ]) {
+    if (!have.has(col)) {
+      db.exec(`ALTER TABLE alert_outcomes ADD COLUMN ${col} REAL`);
+    }
+  }
+}
 
 // Migrate databases created before venue tracking existed.
 {
