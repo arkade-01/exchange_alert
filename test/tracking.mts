@@ -21,6 +21,7 @@ const entry = (base: string, direction: "long" | "short"): OutcomeEntry => ({
   mode: "premove", direction, base, exchanges: ["binance"],
   entryPrice: 100, score: 0.5, oiDeltaPct: 6,
   pxWindowPct: 0.2, quoteVolUsd: 50e6, fundingRate: 0.0001,
+  features: { baselineVolPct: 0.5, oiConcentration: 0.2, volRatio: 1.4, impulseAgeMin: 10 },
 });
 
 db.prepare("DELETE FROM alert_outcomes").run();
@@ -61,8 +62,15 @@ markToMarket(new Map(), T0 + 5 * 60 * MIN);
 check("13. a missing price leaves the row alone", row("LONGC").mfe_pct.toFixed(2), "5.00");
 
 const stats = outcomeStats(30);
-check("14. stats group by mode and side", stats.length, 2);
-check("15. hit rate at 1% counted", stats.every((s) => s.hit1 === 1), true);
+check("14. stats group by mode and side", stats.byMode.length, 2);
+// Test 13 cleared LONGC's 4h mark and gave it no price, so exactly one of the
+// two rows is settled — the report must count that, not assume both.
+check("15. settled counts only rows that reached 4h",
+  stats.byMode.reduce((n, s) => n + s.settled, 0), 1);
+// Both fixtures carry oiConcentration 0.2, so both land in the sustained bucket.
+check("16. outcomes bucket by OI shape", stats.byShape[0]?.label, "sustained");
+check("17. returns normalise by the coin's own volatility",
+  stats.byShape[0]?.norm4h !== null, true);
 
 console.log("\n--- report ---");
 console.log(formatReport(stats, 30));

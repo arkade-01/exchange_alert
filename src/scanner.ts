@@ -28,6 +28,12 @@ import {
   type ModeName,
 } from "./modes.js";
 import { markToMarket, recordOutcomes } from "./tracking.js";
+import {
+  EMPTY_FEATURES,
+  fetchBaseline,
+  oiShape,
+  type AlertFeatures,
+} from "./features.js";
 
 export type { Classification } from "./modes.js";
 
@@ -39,6 +45,9 @@ export interface Signal extends Candidate {
   /** Price change across this mode's window, from snapshots; null before history exists. */
   priceChgPctWindow: number | null;
   classification: Classification;
+  /** Shape of the OI build — see features.ts. Free; derived from the series. */
+  oiConcentration: number | null;
+  impulseAgeMin: number | null;
 }
 
 /** Signals for one base asset, merged across every exchange it fired on. */
@@ -54,6 +63,8 @@ export interface MergedSignal {
   fundingRate: number; // volume-weighted
   lastPrice: number;
   score: number;
+  /** Context captured at alert time so the outcome can be explained later. */
+  features: AlertFeatures;
   /**
    * Venues added since this base was last alerted. Non-empty means a second
    * exchange confirmed an existing signal — that breaks the cooldown, because
@@ -126,6 +137,13 @@ function mergeByBase(mode: Mode, signals: Signal[]): MergedSignal[] {
       fundingRate,
       lastPrice: lead.lastPrice,
       score: 0,
+      // Baseline volatility needs a network call and is filled in later, for
+      // alerts only — there is no point fetching it for a name we suppress.
+      features: {
+        ...EMPTY_FEATURES,
+        oiConcentration: lead.oiConcentration,
+        impulseAgeMin: lead.impulseAgeMin,
+      },
       confirmedOn: [],
     });
   }
@@ -286,8 +304,11 @@ export async function scan(): Promise<ScanResult> {
       if (!mode.admits({ priceChgPct24h: c.priceChgPct24h, priceChgPctWindow }))
         continue;
 
+      const shape = oiShape(points, mode.windowMinutes, now);
       bucket.push({
         ...c,
+        oiConcentration: shape.concentration,
+        impulseAgeMin: shape.impulseAgeMin,
         oiNow: oi.oiNow,
         oiPrev: oi.oiPrev,
         oiDeltaPct: oi.deltaPct,
@@ -314,7 +335,23 @@ export async function scan(): Promise<ScanResult> {
     });
   }
 
-  // 6. Mark open alerts to market. The universe already carries every current
+  // 6. Baseline volatility for the alerts we are actually sending. One call
+  //    each, a handful per scan — never for the whole universe. Without it a
+  //    return is uncomparable across coins: +0.8% is a strong hour on a quiet
+  //    name and noise on a violent one.
+  if (config.TRACK_OUTCOMES) {
+    const firing = modeResults.flatMap((m) => m.alerts);
+    await Promise.all(
+      firing.map((a) =>
+        limit(async () => {
+          const base = await fetchBaseline(`${a.base}USDT`);
+          a.features = { ...a.features, ...base };
+        }),
+      ),
+    );
+  }
+
+  // 7. Mark open alerts to market. The universe already carries every current
   //    price, so scoring past signals forward costs nothing.
   let tracked = 0;
   if (config.TRACK_OUTCOMES) {
@@ -365,6 +402,7 @@ export function commitAlerts(result: ScanResult): void {
         pxWindowPct: a.priceChgPctWindow,
         quoteVolUsd: a.quoteVol24hUsd,
         fundingRate: a.fundingRate,
+        features: a.features,
       })),
       ts,
     );
@@ -401,6 +439,46 @@ function chartUrl(a: MergedSignal): string {
   return `https://www.tradingview.com/chart/?symbol=${venue}:${a.base}USDT.P`;
 }
 
+/** "this hour" reads better than "1h window" for the common case. */
+function windowPhrase(minutes: number): string {
+  if (minutes === 60) return "this hour";
+  if (minutes % 1440 === 0) return `in ${minutes / 1440}d`;
+  if (minutes % 60 === 0) return `in ${minutes / 60}h`;
+  return `in ${minutes} min`;
+}
+
+/** Is the crowd already paying to hold this side? */
+function fundingPhrase(f: number): string {
+  const a = Math.abs(f);
+  if (a < 0.0002) return "funding calm";
+  if (a < 0.0005) return f > 0 ? "longs paying a little" : "shorts paying a little";
+  return f > 0 ? "⚠️ longs paying up" : "⚠️ shorts paying up";
+}
+
+function pricePhrase(a: MergedSignal): string {
+  const p = a.priceChgPctWindow;
+  if (p === null) {
+    return `price ${sign(a.priceChgPct24h)}${a.priceChgPct24h.toFixed(1)}% today`;
+  }
+  if (Math.abs(p) < 0.5) return `price flat (${sign(p)}${p.toFixed(1)}%)`;
+  return `price ${sign(p)}${p.toFixed(1)}%`;
+}
+
+/**
+ * What the OI/price combination actually means, in words. This is the whole
+ * point of the alert: price rising on *new* positions is different from price
+ * rising because shorts are being forced out, and the two look identical on a
+ * chart.
+ */
+function headline(a: MergedSignal, mode: Mode): string {
+  if (mode.name === "premove") {
+    return a.direction === "long"
+      ? "🤫 <b>Quiet build · long side</b> — positions growing while price sits still"
+      : "🤫 <b>Quiet build · short side</b> — short positions growing while price sits still";
+  }
+  return "📈 <b>New longs building</b> — fresh buying, not shorts covering";
+}
+
 export function formatModeMessage(
   result: ModeResult,
   scannedAt: Date,
@@ -411,46 +489,44 @@ export function formatModeMessage(
 
   if (alerts.length === 0) {
     return (
-      `⚪️ <b>${mode.label}</b> — no signals · ${win} window\n` +
+      `⚪️ <b>${mode.label}</b> · nothing right now · ${win} window\n` +
       `<i>${time} UTC</i>`
     );
   }
 
   const header =
-    `${mode.emoji} <b>${mode.label}</b> — ${alerts.length} signal${alerts.length === 1 ? "" : "s"} · ${win} window\n` +
-    `<i>${time} UTC</i>\n`;
+    `${mode.emoji} <b>${mode.label}</b> · ${alerts.length} coin${alerts.length === 1 ? "" : "s"} · ${mode.tagline}\n` +
+    `<i>${time} UTC · looking back ${win}</i>\n`;
 
   const lines = alerts.map((a, i) => {
-    const px =
-      a.priceChgPctWindow !== null
-        ? `${sign(a.priceChgPctWindow)}${a.priceChgPctWindow.toFixed(1)}%`
-        : `${sign(a.priceChgPct24h)}${a.priceChgPct24h.toFixed(1)}% (24h)`;
     const venues = a.exchanges
       .map((e) => EXCHANGE_LABEL[e] ?? e)
       .sort()
       .join(", ");
-    const funding = `${sign(a.fundingRate)}${(a.fundingRate * 100).toFixed(3)}%`;
 
-    const confirm = a.confirmedOn.length
-      ? `  ⚡ <b>confirmed on ${a.confirmedOn.map((e) => EXCHANGE_LABEL[e] ?? e).join(", ")}</b>`
-      : "";
-
-    // Pre-move leads with the side, since it calls shorts as well as longs.
-    const bias =
-      mode.name === "premove"
-        ? `${a.direction === "long" ? "📈 long" : "📉 short"} bias · `
-        : "";
-    const regime =
-      a.direction === "long" ? "longs building" : "shorts building";
+    // Caveats the reader would otherwise have to infer from raw numbers.
+    const notes: string[] = [venues, fundingPhrase(a.fundingRate)];
+    if (a.quoteVol24hUsd < 25e6) notes.push("⚠️ thin book");
+    if (a.exchanges.length > 1) notes.push(`⚡ ${a.exchanges.length} exchanges agree`);
+    if (a.confirmedOn.length) {
+      notes.push(
+        `⚡ just confirmed on ${a.confirmedOn.map((e) => EXCHANGE_LABEL[e] ?? e).join(", ")}`,
+      );
+    }
 
     return (
-      `<b>${i + 1}. <a href="${chartUrl(a)}">${a.base}</a></b>  score ${Math.round(a.score * 100)}${confirm}\n` +
-      `  OI <b>${sign(a.oiDeltaPct)}${a.oiDeltaPct.toFixed(1)}%</b> · px ${px} · vol ${fmtUsd(a.quoteVol24hUsd)}\n` +
-      `  ${bias}${regime} · ${venues} · funding ${funding}`
+      `<b>${i + 1}. <a href="${chartUrl(a)}">${a.base}</a></b>  score ${Math.round(a.score * 100)}\n` +
+      `${headline(a, mode)}\n` +
+      `Open positions <b>${sign(a.oiDeltaPct)}${a.oiDeltaPct.toFixed(1)}%</b> ${windowPhrase(mode.windowMinutes)} · ` +
+      `${pricePhrase(a)} · ${fmtUsd(a.quoteVol24hUsd)}/day\n` +
+      `<i>${notes.join(" · ")}</i>`
     );
   });
 
-  return `${header}\n${lines.join("\n\n")}`;
+  return (
+    `${header}\n${lines.join("\n\n")}\n\n` +
+    `<i>Candidates to look at — not trade calls.</i>`
+  );
 }
 
 /** Every mode's message, joined. Modes with nothing to say stay silent. */

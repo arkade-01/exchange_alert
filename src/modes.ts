@@ -24,6 +24,8 @@ export interface Mode {
   name: ModeName;
   emoji: string;
   label: string;
+  /** One line telling a reader what this mode is claiming, in plain terms. */
+  tagline: string;
   /** Window this mode measures OI and price over. */
   windowMinutes: number;
   minOiDelta: number;
@@ -86,7 +88,8 @@ const crossBonus = (exchangesFiring: number) =>
 export const breakout: Mode = {
   name: "breakout",
   emoji: "🟢",
-  label: "OI Scanner",
+  label: "Breakout",
+  tagline: "moves already underway",
   windowMinutes: config.WINDOW_MINUTES,
   minOiDelta: config.MIN_OI_DELTA,
   minScore: -Infinity, // rank-only, as before — no score floor
@@ -126,6 +129,7 @@ export const premove: Mode = {
   name: "premove",
   emoji: "🔵",
   label: "Pre-Move",
+  tagline: "price still quiet",
   windowMinutes: config.PREMOVE_WINDOW_MINUTES,
   minOiDelta: config.PREMOVE_MIN_OI_DELTA,
   minScore: config.PREMOVE_MIN_SCORE,

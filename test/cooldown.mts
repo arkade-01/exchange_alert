@@ -14,6 +14,7 @@ const sig = (base: string, exchanges: string[]): MergedSignal => ({
   oiDeltaPct: 12.4, quoteVol24hUsd: 84e6,
   priceChgPct24h: 3.1, priceChgPctWindow: 3.1, fundingRate: 0.00011,
   lastPrice: 1, score: 0.82, confirmedOn: [],
+  features: { baselineVolPct: 0.5, oiConcentration: 0.3, volRatio: 2.1, impulseAgeMin: 12 },
 });
 
 /** Cooldown keys are namespaced by mode and side, matching the scanner. */

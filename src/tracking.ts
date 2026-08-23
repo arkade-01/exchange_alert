@@ -1,5 +1,6 @@
 import db from "./db.js";
 import type { Direction, ModeName } from "./modes.js";
+import type { AlertFeatures } from "./features.js";
 
 /**
  * Post-signal performance tracking.
@@ -25,14 +26,17 @@ export interface OutcomeEntry {
   pxWindowPct: number | null;
   quoteVolUsd: number;
   fundingRate: number;
+  features: AlertFeatures;
 }
 
 const insertOutcome = db.prepare(
   `INSERT INTO alert_outcomes
      (ts, mode, direction, base, exchanges, entry_price, score,
-      oi_delta_pct, px_window_pct, quote_vol_usd, funding_rate, last_check_ts)
+      oi_delta_pct, px_window_pct, quote_vol_usd, funding_rate, last_check_ts,
+      baseline_vol_pct, oi_concentration, vol_ratio, impulse_age_min)
    VALUES (@ts, @mode, @direction, @base, @exchanges, @entryPrice, @score,
-           @oiDeltaPct, @pxWindowPct, @quoteVolUsd, @fundingRate, @ts)`,
+           @oiDeltaPct, @pxWindowPct, @quoteVolUsd, @fundingRate, @ts,
+           @baselineVolPct, @oiConcentration, @volRatio, @impulseAgeMin)`,
 );
 
 export function recordOutcomes(entries: OutcomeEntry[], ts: number): void {
@@ -51,6 +55,10 @@ export function recordOutcomes(entries: OutcomeEntry[], ts: number): void {
         pxWindowPct: e.pxWindowPct,
         quoteVolUsd: e.quoteVolUsd,
         fundingRate: e.fundingRate,
+        baselineVolPct: e.features.baselineVolPct,
+        oiConcentration: e.features.oiConcentration,
+        volRatio: e.features.volRatio,
+        impulseAgeMin: e.features.impulseAgeMin,
       });
     }
   });
@@ -133,25 +141,6 @@ export function markToMarket(
 
 // ---- reporting --------------------------------------------------------------
 
-export interface ModeStats {
-  mode: string;
-  direction: string;
-  n: number;
-  settled: number;
-  avgMfe: number;
-  avgMae: number;
-  avgRet1h: number | null;
-  avgRet4h: number | null;
-  hit1: number;
-  hit2: number;
-  hit5: number;
-}
-
-const selectAll = db.prepare(
-  `SELECT mode, direction, entry_price, mfe_pct, mae_pct, px_1h, px_4h
-   FROM alert_outcomes WHERE ts >= ?`,
-);
-
 interface ReportRow {
   mode: string;
   direction: string;
@@ -160,83 +149,177 @@ interface ReportRow {
   mae_pct: number | null;
   px_1h: number | null;
   px_4h: number | null;
+  baseline_vol_pct: number | null;
+  oi_concentration: number | null;
+  vol_ratio: number | null;
+  impulse_age_min: number | null;
 }
 
-export function outcomeStats(sinceDays = 30): ModeStats[] {
-  const rows = selectAll.all(
-    Date.now() - sinceDays * 86_400_000,
-  ) as ReportRow[];
+const selectAll = db.prepare(
+  `SELECT mode, direction, entry_price, mfe_pct, mae_pct, px_1h, px_4h,
+          baseline_vol_pct, oi_concentration, vol_ratio, impulse_age_min
+   FROM alert_outcomes WHERE ts >= ?`,
+);
 
-  const groups = new Map<string, ReportRow[]>();
-  for (const r of rows) {
-    const k = `${r.mode}|${r.direction}`;
-    const list = groups.get(k);
-    if (list) list.push(r);
-    else groups.set(k, [r]);
-  }
+export interface Summary {
+  label: string;
+  n: number;
+  settled: number;
+  ret1h: number | null;
+  ret4h: number | null;
+  /**
+   * The 4h return in units of the coin's own median hourly move. This is the
+   * only figure that compares across coins: +0.8% is a strong hour on a quiet
+   * name and noise on a violent one, and a raw average silently mixes them.
+   */
+  norm4h: number | null;
+  mfe: number | null;
+  mae: number | null;
+  winRate: number | null;
+}
 
-  const ret = (r: ReportRow, px: number | null) => {
-    if (px === null || !(r.entry_price > 0)) return null;
-    const raw = ((px - r.entry_price) / r.entry_price) * 100;
-    return r.direction === "short" ? -raw : raw;
+const mean = (xs: number[]) =>
+  xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null;
+
+/** Return at a mark, signed for the alert's direction. */
+function retAt(r: ReportRow, px: number | null): number | null {
+  if (px === null || !(r.entry_price > 0)) return null;
+  const raw = ((px - r.entry_price) / r.entry_price) * 100;
+  return r.direction === "short" ? -raw : raw;
+}
+
+function summarize(label: string, rows: ReportRow[]): Summary {
+  const r1 = rows.map((r) => retAt(r, r.px_1h)).filter((x): x is number => x !== null);
+  const r4 = rows.map((r) => retAt(r, r.px_4h)).filter((x): x is number => x !== null);
+
+  const norm = rows
+    .map((r) => {
+      const ret = retAt(r, r.px_4h);
+      if (ret === null || !r.baseline_vol_pct || r.baseline_vol_pct <= 0) return null;
+      return ret / r.baseline_vol_pct;
+    })
+    .filter((x): x is number => x !== null);
+
+  return {
+    label,
+    n: rows.length,
+    settled: rows.filter((r) => r.px_4h !== null).length,
+    ret1h: mean(r1),
+    ret4h: mean(r4),
+    norm4h: mean(norm),
+    mfe: mean(rows.map((r) => r.mfe_pct).filter((x): x is number => x !== null)),
+    mae: mean(rows.map((r) => r.mae_pct).filter((x): x is number => x !== null)),
+    winRate: r4.length ? r4.filter((x) => x > 0).length / r4.length : null,
   };
-  const mean = (xs: number[]) =>
-    xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0;
-
-  const out: ModeStats[] = [];
-  for (const [key, list] of groups) {
-    const [mode, direction] = key.split("|") as [string, string];
-    const scored = list.filter((r) => r.mfe_pct !== null);
-    const mfes = scored.map((r) => r.mfe_pct!);
-    const r1h = list.map((r) => ret(r, r.px_1h)).filter((x): x is number => x !== null);
-    const r4h = list.map((r) => ret(r, r.px_4h)).filter((x): x is number => x !== null);
-    const share = (t: number) =>
-      scored.length ? mfes.filter((m) => m >= t).length / scored.length : 0;
-
-    out.push({
-      mode,
-      direction,
-      n: list.length,
-      settled: list.filter((r) => r.px_4h !== null).length,
-      avgMfe: mean(mfes),
-      avgMae: mean(scored.map((r) => r.mae_pct!)),
-      avgRet1h: r1h.length ? mean(r1h) : null,
-      avgRet4h: r4h.length ? mean(r4h) : null,
-      hit1: share(1),
-      hit2: share(2),
-      hit5: share(5),
-    });
-  }
-  return out.sort((a, b) => b.n - a.n);
 }
 
-export function formatReport(stats: ModeStats[], sinceDays: number): string {
-  if (!stats.length) {
-    return `No alerts recorded in the last ${sinceDays} days.`;
+function groupBy(rows: ReportRow[], key: (r: ReportRow) => string | null) {
+  const g = new Map<string, ReportRow[]>();
+  for (const r of rows) {
+    const k = key(r);
+    if (k === null) continue;
+    const list = g.get(k);
+    if (list) list.push(r);
+    else g.set(k, [r]);
   }
-  const pct = (x: number) => `${(x * 100).toFixed(0)}%`;
-  const num = (x: number | null, d = 2) =>
-    x === null ? "  —  " : `${x >= 0 ? "+" : ""}${x.toFixed(d)}%`;
+  return g;
+}
 
-  const lines = [
-    `Alert outcomes · last ${sinceDays}d`,
+/**
+ * How lumpy the OI build was. The composite score sees only the total OI
+ * change, so a violent one-bucket spike and a patient hour-long accumulation
+ * can score identically — this is the split that tells them apart.
+ */
+function shapeBucket(c: number | null): string | null {
+  if (c === null) return null;
+  if (c < 0.3) return "sustained";
+  if (c <= 0.6) return "mixed";
+  return "spike";
+}
+
+export interface Report {
+  byMode: Summary[];
+  byShape: Summary[];
+  byLateness: Summary[];
+  total: number;
+}
+
+export function outcomeStats(sinceDays = 30): Report {
+  const rows = selectAll.all(Date.now() - sinceDays * 86_400_000) as ReportRow[];
+
+  const byMode = [...groupBy(rows, (r) => `${r.mode} ${r.direction}`)]
+    .map(([k, v]) => summarize(k, v))
+    .sort((a, b) => b.n - a.n);
+
+  const order = ["sustained", "mixed", "spike"];
+  const byShape = [...groupBy(rows, (r) => shapeBucket(r.oi_concentration))]
+    .map(([k, v]) => summarize(k, v))
+    .sort((a, b) => order.indexOf(a.label) - order.indexOf(b.label));
+
+  const byLateness = [...groupBy(rows, (r) =>
+    r.impulse_age_min === null
+      ? null
+      : r.impulse_age_min <= 15
+        ? "fresh (<15m)"
+        : r.impulse_age_min <= 40
+          ? "late (15-40m)"
+          : "stale (>40m)",
+  )]
+    .map(([k, v]) => summarize(k, v))
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  return { byMode, byShape, byLateness, total: rows.length };
+}
+
+const pct = (x: number | null, d = 2) =>
+  x === null ? "   —  " : `${x >= 0 ? "+" : ""}${x.toFixed(d)}%`;
+const sigma = (x: number | null) =>
+  x === null ? "   —  " : `${x >= 0 ? "+" : ""}${x.toFixed(2)}s`;
+const rate = (x: number | null) => (x === null ? "  — " : `${(x * 100).toFixed(0)}%`);
+
+function table(title: string, rows: Summary[], note?: string): string[] {
+  if (!rows.length) return [];
+  const out = [
     "",
-    "mode      dir    n  settled   avgMFE   avgMAE    +1h     +4h   ≥1%  ≥2%  ≥5%",
-    "─".repeat(78),
+    title,
+    "label            n  done     +1h      +4h   vs base   win     MFE     MAE",
+    "-".repeat(74),
   ];
-  for (const s of stats) {
-    lines.push(
-      `${s.mode.padEnd(9)} ${s.direction.padEnd(5)} ${String(s.n).padStart(3)} ` +
-        `${String(s.settled).padStart(7)}  ${num(s.avgMfe).padStart(7)}  ` +
-        `${num(s.avgMae).padStart(7)}  ${num(s.avgRet1h).padStart(6)}  ` +
-        `${num(s.avgRet4h).padStart(6)}  ${pct(s.hit1).padStart(4)} ` +
-        `${pct(s.hit2).padStart(4)} ${pct(s.hit5).padStart(4)}`,
+  for (const s of rows) {
+    out.push(
+      `${s.label.padEnd(14)} ${String(s.n).padStart(3)} ${String(s.settled).padStart(5)}  ` +
+        `${pct(s.ret1h).padStart(7)} ${pct(s.ret4h).padStart(7)} ${sigma(s.norm4h).padStart(8)} ` +
+        `${rate(s.winRate).padStart(5)} ${pct(s.mfe).padStart(7)} ${pct(s.mae).padStart(7)}`,
     );
   }
+  if (note) out.push(note);
+  return out;
+}
+
+export function formatReport(rep: Report, sinceDays: number): string {
+  if (!rep.total) return `No alerts recorded in the last ${sinceDays} days.`;
+
+  const lines = [`Alert outcomes - last ${sinceDays}d - ${rep.total} alerts`];
+  lines.push(...table("BY MODE", rep.byMode));
+  lines.push(
+    ...table(
+      "BY OI SHAPE",
+      rep.byShape,
+      "  sustained = OI built steadily; spike = one bucket did most of it",
+    ),
+  );
+  lines.push(
+    ...table(
+      "BY ENTRY LATENESS",
+      rep.byLateness,
+      "  minutes between the largest OI jump and the alert",
+    ),
+  );
   lines.push(
     "",
-    "MFE/MAE are signed for the alert's direction, so shorts and longs share a scale.",
-    "`settled` counts alerts that have reached the full 4h horizon.",
+    "'vs base' is the 4h return in units of that coin's median hourly move -",
+    "the only column comparable across coins. Anything under ~1s is noise.",
+    "Rows need ~30 alerts before a difference between them means anything.",
   );
   return lines.join("\n");
 }
