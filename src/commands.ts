@@ -33,20 +33,50 @@ const HELP = [
   "<b>Commands</b>",
   "",
   "/report [days] - performance of past alerts (default 7)",
+  "/id - this chat's numeric id",
   "/help - this message",
 ].join("\n");
 
-async function handle(text: string): Promise<void> {
+/**
+ * Handle one message.
+ *
+ * `authorised` is false for anyone who is not the configured report chat, and
+ * for everyone while TELEGRAM_REPORT_CHAT_ID is still unset. Unauthorised
+ * chats can learn their own id and nothing else — that is what breaks the
+ * bootstrap deadlock, since you cannot configure the id without first knowing
+ * it, and Telegram offers no @username form for a private chat.
+ */
+async function handle(
+  text: string,
+  from: string,
+  authorised: boolean,
+): Promise<void> {
   const [cmd, arg] = text.trim().split(/\s+/);
-  const chat = config.TELEGRAM_REPORT_CHAT_ID;
+  const verb = (cmd ?? "").split("@")[0];
 
-  switch ((cmd ?? "").split("@")[0]) {
+  if (!authorised) {
+    if (verb === "/id" || verb === "/start") {
+      await sendMessage(
+        `This chat's id is <code>${from}</code>\n\n` +
+          `Set <b>TELEGRAM_REPORT_CHAT_ID</b> to that value and redeploy to ` +
+          `receive performance reports here.`,
+        from,
+      );
+    }
+    return; // never anything else to a chat we do not know
+  }
+
+  const chat = config.TELEGRAM_REPORT_CHAT_ID;
+  switch (verb) {
     case "/report": {
       const days = Number(arg) > 0 ? Number(arg) : 7;
       const text = formatReport(outcomeStats(days), days);
       await sendMessage(`<pre>${text}</pre>`, chat);
       break;
     }
+    case "/id":
+      await sendMessage(`This chat's id is <code>${from}</code>`, chat);
+      break;
     case "/start":
     case "/help":
       await sendMessage(HELP, chat);
@@ -86,10 +116,14 @@ async function poll(): Promise<void> {
         offset = u.update_id + 1;
         const msg = u.message;
         if (!msg?.text) continue;
-        // Channel posts and strangers both land here; neither is authorised.
-        if (String(msg.chat.id) !== config.TELEGRAM_REPORT_CHAT_ID) continue;
+        const from = String(msg.chat.id);
+        // Channel posts and strangers both land here. Neither is authorised;
+        // both can still ask for their own id.
+        const authorised =
+          !!config.TELEGRAM_REPORT_CHAT_ID &&
+          from === config.TELEGRAM_REPORT_CHAT_ID;
         try {
-          await handle(msg.text);
+          await handle(msg.text, from, authorised);
         } catch (err) {
           console.error(`command failed: ${(err as Error).message}`);
         }
@@ -101,13 +135,20 @@ async function poll(): Promise<void> {
   }
 }
 
-/** No-op unless a report chat is configured — there is no one to answer. */
+/**
+ * Runs whenever a bot token exists. It deliberately starts before a report
+ * chat is configured, because /id is how that value is discovered.
+ */
 export function startCommandListener(): void {
   if (running) return;
-  if (!config.TELEGRAM_BOT_TOKEN || !config.TELEGRAM_REPORT_CHAT_ID) return;
+  if (!config.TELEGRAM_BOT_TOKEN) return;
   running = true;
   void poll();
-  console.error("telegram commands: listening for /report");
+  console.error(
+    config.TELEGRAM_REPORT_CHAT_ID
+      ? "telegram commands: listening for /report"
+      : "telegram commands: listening for /id (no report chat configured yet)",
+  );
 }
 
 export function stopCommandListener(): void {
