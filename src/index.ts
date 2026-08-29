@@ -2,7 +2,7 @@ import { config, windowCadenceWarning } from "./config.js";
 import { getMeta, hasAlertHistory, setMeta } from "./db.js";
 import { installDnsOverride } from "./net.js";
 import { commitAlerts, formatMessage, scan } from "./scanner.js";
-import { sendMessage } from "./telegram.js";
+import { sendMessage, sendPreformatted } from "./telegram.js";
 import { formatReport, outcomeStats } from "./tracking.js";
 import { backfill } from "./backfill.js";
 import { startCommandListener, stopCommandListener } from "./commands.js";
@@ -76,7 +76,7 @@ async function maybeSendReport(now: number): Promise<void> {
   const days = Math.max(1, Math.ceil(config.REPORT_EVERY_HOURS / 24) * 7);
   const text = formatReport(outcomeStats(days), days);
   try {
-    await sendMessage(`<pre>${text}</pre>`, chat);
+    await sendPreformatted(text, chat);
     setMeta(LAST_REPORT_KEY, String(now));
     console.error("  performance report sent");
   } catch (err) {
@@ -154,7 +154,7 @@ async function main(): Promise<void> {
             "It is deliberately separate from the alert channel.",
         );
       }
-      await sendMessage(`<pre>${text}</pre>`, config.TELEGRAM_REPORT_CHAT_ID);
+      await sendPreformatted(text, config.TELEGRAM_REPORT_CHAT_ID);
       console.error("report sent");
     }
     if (!args.once && !args.loop) return;

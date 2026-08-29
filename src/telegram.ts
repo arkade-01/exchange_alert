@@ -24,6 +24,34 @@ export function chunk(text: string, limit = TELEGRAM_LIMIT): string[] {
   return chunks;
 }
 
+/**
+ * Escape text destined for HTML parse mode. Required for anything we did not
+ * author as markup — a report row reading "fresh (<15m)" is otherwise parsed
+ * as an unknown start tag and the whole send is rejected with a 400.
+ */
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "&amp;") // must run first, or it double-escapes the rest
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * Send plain text inside a <pre> block.
+ *
+ * Escaping happens before chunking, and each chunk is wrapped individually:
+ * wrapping first would let a long report split between the opening and closing
+ * tag, leaving both halves invalid.
+ */
+export async function sendPreformatted(
+  text: string,
+  chatId = config.TELEGRAM_CHAT_ID,
+): Promise<void> {
+  for (const part of chunk(escapeHtml(text), TELEGRAM_LIMIT - 32)) {
+    await sendMessage(`<pre>${part}</pre>`, chatId);
+  }
+}
+
 export async function sendMessage(
   text: string,
   chatId = config.TELEGRAM_CHAT_ID,
