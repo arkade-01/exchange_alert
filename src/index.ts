@@ -1,5 +1,5 @@
 import { config, windowCadenceWarning } from "./config.js";
-import { hasAlertHistory } from "./db.js";
+import { getMeta, hasAlertHistory, setMeta } from "./db.js";
 import { installDnsOverride } from "./net.js";
 import { commitAlerts, formatMessage, scan } from "./scanner.js";
 import { sendMessage } from "./telegram.js";
@@ -44,6 +44,39 @@ function parseArgs(argv: string[]): Args {
 
   if (!args.once && !args.loop && args.report === null) args.once = true;
   return args;
+}
+
+const LAST_REPORT_KEY = "last_report_ts";
+
+/**
+ * Push the performance report on a schedule.
+ *
+ * The worker usually has no shell — on Railway and similar hosts the container
+ * just runs `--loop` — so a scheduled push is the only way to read the numbers
+ * without SSH. Delivery is to TELEGRAM_REPORT_CHAT_ID only; it never falls back
+ * to the alert channel.
+ *
+ * The timestamp lives in the database rather than in memory, so redeploying
+ * does not re-send. A worker that has never reported sends one immediately,
+ * which is what makes the first deploy after enabling this useful.
+ */
+async function maybeSendReport(now: number): Promise<void> {
+  const chat = config.TELEGRAM_REPORT_CHAT_ID;
+  if (!chat || config.REPORT_EVERY_HOURS <= 0) return;
+
+  const last = Number(getMeta(LAST_REPORT_KEY) ?? 0);
+  if (now - last < config.REPORT_EVERY_HOURS * 3_600_000) return;
+
+  const days = Math.max(1, Math.ceil(config.REPORT_EVERY_HOURS / 24) * 7);
+  const text = formatReport(outcomeStats(days), days);
+  try {
+    await sendMessage(`<pre>${text}</pre>`, chat);
+    setMeta(LAST_REPORT_KEY, String(now));
+    console.error("  performance report sent");
+  } catch (err) {
+    // A failed report must never take down the scan loop.
+    console.error(`  report send failed: ${(err as Error).message}`);
+  }
 }
 
 /**
@@ -150,6 +183,7 @@ async function main(): Promise<void> {
     try {
       await runOnce(args.dryRun, prime);
       prime = false;
+      if (!args.dryRun) await maybeSendReport(Date.now());
     } catch (err) {
       // A single bad scan must never kill the worker.
       console.error(`Scan failed: ${(err as Error).message}`);
