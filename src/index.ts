@@ -5,6 +5,7 @@ import { commitAlerts, formatMessage, scan } from "./scanner.js";
 import { sendMessage } from "./telegram.js";
 import { formatReport, outcomeStats } from "./tracking.js";
 import { backfill } from "./backfill.js";
+import { startCommandListener, stopCommandListener } from "./commands.js";
 
 // Must run before the first request goes out.
 installDnsOverride();
@@ -179,6 +180,7 @@ async function main(): Promise<void> {
   let wake: (() => void) | null = null;
   const stop = () => {
     stopping = true;
+    stopCommandListener();
     console.error("\nShutting down after the current scan…");
     wake?.();
   };
@@ -207,6 +209,10 @@ async function main(): Promise<void> {
       console.error(`backfill failed: ${(err as Error).message}`);
     }
   }
+
+  // Long-polls alongside the scan loop so /report answers in about a second
+  // rather than waiting for the next scan.
+  if (!args.dryRun) startCommandListener();
 
   console.error(`Looping every ${args.intervalMin} min. Ctrl-C to stop.`);
   while (!stopping) {
