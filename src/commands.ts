@@ -1,5 +1,5 @@
 import { config } from "./config.js";
-import { sendMessage } from "./telegram.js";
+import { sendMessage, sendPreformatted } from "./telegram.js";
 import { formatReport, outcomeStats } from "./tracking.js";
 
 /**
@@ -71,7 +71,7 @@ async function handle(
     case "/report": {
       const days = Number(arg) > 0 ? Number(arg) : 7;
       const text = formatReport(outcomeStats(days), days);
-      await sendMessage(`<pre>${text}</pre>`, chat);
+      await sendPreformatted(text, chat);
       break;
     }
     case "/id":
