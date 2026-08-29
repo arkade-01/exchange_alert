@@ -105,6 +105,14 @@ const Schema = z.object({
   // hosts, so a scheduled push is the only way to read the numbers without one.
   REPORT_EVERY_HOURS: z.coerce.number().nonnegative().default(24),
 
+  // Recompute missing alert features once at loop start. Binance only serves
+  // ~30 days of OI history, so rows age out permanently — and the worker has no
+  // shell to run --backfill by hand. A no-op once every row is complete.
+  BACKFILL_ON_BOOT: z
+    .enum(["true", "false"])
+    .default("true")
+    .transform((v) => v === "true"),
+
   DB_PATH: z.string().default("./oi-scanner.db"),
   HTTP_TIMEOUT_MS: z.coerce.number().int().positive().default(15_000),
 });

@@ -4,6 +4,7 @@ import { installDnsOverride } from "./net.js";
 import { commitAlerts, formatMessage, scan } from "./scanner.js";
 import { sendMessage } from "./telegram.js";
 import { formatReport, outcomeStats } from "./tracking.js";
+import { backfill } from "./backfill.js";
 
 // Must run before the first request goes out.
 installDnsOverride();
@@ -14,6 +15,7 @@ interface Args {
   dryRun: boolean;
   report: number | null; // lookback in days
   send: boolean; // deliver the report to Telegram instead of stdout
+  backfill: boolean; // recompute features for rows recorded before they existed
   intervalMin: number;
 }
 
@@ -24,6 +26,7 @@ function parseArgs(argv: string[]): Args {
     dryRun: argv.includes("--dry-run"),
     report: null,
     send: argv.includes("--send"),
+    backfill: argv.includes("--backfill"),
     intervalMin: config.SCAN_INTERVAL_MIN,
   };
 
@@ -42,7 +45,9 @@ function parseArgs(argv: string[]): Args {
     args.report = Number.isFinite(v) && v > 0 ? v : 30;
   }
 
-  if (!args.once && !args.loop && args.report === null) args.once = true;
+  if (!args.once && !args.loop && args.report === null && !args.backfill) {
+    args.once = true;
+  }
   return args;
 }
 
@@ -127,6 +132,15 @@ async function runOnce(dryRun: boolean, prime = false): Promise<void> {
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
 
+  if (args.backfill) {
+    const r = await backfill();
+    console.log(
+      `backfill: ${r.filled} filled, ${r.expired} past Binance's ~30d OI ` +
+        `retention, ${r.failed} failed (of ${r.total} incomplete rows)`,
+    );
+    if (!args.once && !args.loop && args.report === null) return;
+  }
+
   if (args.report !== null) {
     const text = formatReport(outcomeStats(args.report), args.report);
     console.log(text);
@@ -176,6 +190,22 @@ async function main(): Promise<void> {
   let prime = !args.dryRun && !hasAlertHistory();
   if (prime) {
     console.error("No alert history — first scan will prime cooldowns silently.");
+  }
+
+  // Old rows lose their features permanently once they pass Binance's OI
+  // retention, and there is no shell here to run --backfill manually.
+  if (config.BACKFILL_ON_BOOT && !args.dryRun) {
+    try {
+      const r = await backfill();
+      if (r.total) {
+        console.error(
+          `backfill: ${r.filled} filled, ${r.expired} past OI retention, ` +
+            `${r.failed} failed (of ${r.total})`,
+        );
+      }
+    } catch (err) {
+      console.error(`backfill failed: ${(err as Error).message}`);
+    }
   }
 
   console.error(`Looping every ${args.intervalMin} min. Ctrl-C to stop.`);
