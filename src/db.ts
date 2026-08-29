@@ -26,6 +26,12 @@ db.exec(`
   -- Every alert ever fired, with its entry price, scored forward in time.
   -- This is what turns the thresholds from guesses into measurements: without
   -- it there is no way to tell whether a factor earns its weight.
+  -- Small key/value store for worker state that must outlive a restart.
+  CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
   CREATE TABLE IF NOT EXISTS alert_outcomes (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     ts            INTEGER NOT NULL,
@@ -243,6 +249,20 @@ export function syncBucketMembership(keysInBucket: string[]): void {
     ).run(...inBucket);
   });
   tx();
+}
+
+const selectMeta = db.prepare(`SELECT value FROM meta WHERE key = ?`);
+const upsertMeta = db.prepare(
+  `INSERT INTO meta (key, value) VALUES (?, ?)
+   ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+);
+
+export function getMeta(key: string): string | undefined {
+  return (selectMeta.get(key) as { value: string } | undefined)?.value;
+}
+
+export function setMeta(key: string, value: string): void {
+  upsertMeta.run(key, value);
 }
 
 export default db;

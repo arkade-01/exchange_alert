@@ -82,10 +82,13 @@ interface Kline {
  */
 export async function fetchBaseline(
   symbol: string,
+  /** Measure as of this moment instead of now — used when backfilling. */
+  endTime?: number,
 ): Promise<Pick<AlertFeatures, "baselineVolPct" | "volRatio">> {
   try {
+    const at = endTime ? `&endTime=${endTime}` : "";
     const kl = await getJson<Kline[]>(
-      `${config.BINANCE_BASE_URL}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=500`,
+      `${config.BINANCE_BASE_URL}/fapi/v1/klines?symbol=${symbol}&interval=1h&limit=500${at}`,
     );
     if (kl.length < 24) return { baselineVolPct: null, volRatio: null };
 
