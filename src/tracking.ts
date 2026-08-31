@@ -315,6 +315,7 @@ export function formatReport(rep: Report, sinceDays: number): string {
       "  minutes between the largest OI jump and the alert",
     ),
   );
+  lines.push("", ...verdict({ ...rep }).split("\n"));
   lines.push(
     "",
     "'vs base' is the 4h return in units of that coin's median hourly move -",
@@ -322,4 +323,121 @@ export function formatReport(rep: Report, sinceDays: number): string {
     "Rows need ~30 alerts before a difference between them means anything.",
   );
   return lines.join("\n");
+}
+
+// ---- per-signal export ------------------------------------------------------
+
+const selectRows = db.prepare(
+  `SELECT ts, mode, direction, base, exchanges, entry_price, score,
+          oi_delta_pct, px_window_pct, quote_vol_usd, funding_rate,
+          baseline_vol_pct, oi_concentration, vol_ratio, impulse_age_min,
+          px_15m, px_1h, px_4h, mfe_pct, mae_pct
+   FROM alert_outcomes WHERE ts >= ? ORDER BY ts DESC`,
+);
+
+/**
+ * Every alert as CSV, one row each, with the derived returns already computed.
+ *
+ * The aggregate tables answer "does this work"; they cannot answer "what
+ * happened to that one". Returns are included rather than left to the reader
+ * because they are signed for direction, which a spreadsheet cannot infer.
+ */
+export function exportCsv(sinceDays = 7): string {
+  const rows = selectRows.all(Date.now() - sinceDays * 86_400_000) as (ReportRow & {
+    ts: number;
+    base: string;
+    exchanges: string;
+    score: number;
+    oi_delta_pct: number;
+    px_window_pct: number | null;
+    quote_vol_usd: number;
+    funding_rate: number;
+    px_15m: number | null;
+  })[];
+
+  const cols = [
+    "time_utc", "mode", "direction", "base", "exchanges", "entry_price", "score",
+    "oi_delta_pct", "px_window_pct", "quote_vol_usd", "funding_rate",
+    "baseline_vol_pct", "oi_concentration", "vol_ratio", "impulse_age_min",
+    "ret_15m_pct", "ret_1h_pct", "ret_4h_pct", "ret_4h_vs_baseline",
+    "mfe_pct", "mae_pct",
+  ];
+
+  const num = (x: number | null | undefined, d = 4) =>
+    x === null || x === undefined || !Number.isFinite(x) ? "" : x.toFixed(d);
+
+  const lines = [cols.join(",")];
+  for (const r of rows) {
+    const r15 = retAt(r, r.px_15m);
+    const r1h = retAt(r, r.px_1h);
+    const r4h = retAt(r, r.px_4h);
+    const norm =
+      r4h !== null && r.baseline_vol_pct && r.baseline_vol_pct > 0
+        ? r4h / r.baseline_vol_pct
+        : null;
+
+    lines.push([
+      new Date(r.ts).toISOString().slice(0, 19).replace("T", " "),
+      r.mode, r.direction, r.base, `"${r.exchanges}"`,
+      num(r.entry_price, 8), num(r.score, 3),
+      num(r.oi_delta_pct, 2), num(r.px_window_pct, 2),
+      num(r.quote_vol_usd, 0), num(r.funding_rate, 6),
+      num(r.baseline_vol_pct, 3), num(r.oi_concentration, 3),
+      num(r.vol_ratio, 2), num(r.impulse_age_min, 0),
+      num(r15, 2), num(r1h, 2), num(r4h, 2), num(norm, 2),
+      num(r.mfe_pct, 2), num(r.mae_pct, 2),
+    ].join(","));
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The tables in plain sentences.
+ *
+ * A grid of signed percentages does not say whether the thing works. Stating
+ * the conclusion in words — including "it does not" — is the point of having
+ * collected the data at all.
+ */
+export function verdict(rep: Report): string {
+  const out: string[] = ["WHAT THIS SAYS", ""];
+  const MIN_N = 30;
+
+  for (const m of rep.byMode) {
+    if (m.settled < MIN_N) {
+      out.push(`${m.label}: only ${m.settled} settled - too few to judge.`);
+      continue;
+    }
+    const s = m.norm4h ?? 0;
+    const win = ((m.winRate ?? 0) * 100).toFixed(0);
+    const call =
+      s >= 0.5 ? "a real edge"
+      : s <= -0.5 ? "actively losing"
+      : "no edge - indistinguishable from noise";
+    out.push(
+      `${m.label}: ${call}. ${m.settled} settled, ${s.toFixed(2)}s at 4h, ${win}% win rate.`,
+    );
+  }
+
+  const ranked = rep.byShape
+    .concat(rep.byLateness)
+    .filter((b) => b.settled >= MIN_N && b.norm4h !== null);
+  if (ranked.length > 1) {
+    const best = ranked.reduce((a, b) => (b.norm4h! > a.norm4h! ? b : a));
+    const worst = ranked.reduce((a, b) => (b.norm4h! < a.norm4h! ? b : a));
+    out.push(
+      "",
+      `Best bucket: ${best.label} (${best.norm4h!.toFixed(2)}s).`,
+      `Worst bucket: ${worst.label} (${worst.norm4h!.toFixed(2)}s).`,
+      Math.abs(best.norm4h! - worst.norm4h!) < 0.5
+        ? "The gap between them is small - no feature here is separating winners from losers."
+        : "That gap is worth acting on.",
+    );
+  }
+
+  out.push(
+    "",
+    "A win rate near 50% with MFE and MAE roughly equal is what a random",
+    "entry looks like. Edge shows up as MFE clearly exceeding MAE.",
+  );
+  return out.join("\n");
 }

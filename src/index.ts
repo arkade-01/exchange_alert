@@ -3,7 +3,7 @@ import { getMeta, hasAlertHistory, setMeta } from "./db.js";
 import { installDnsOverride } from "./net.js";
 import { commitAlerts, formatMessage, scan } from "./scanner.js";
 import { sendMessage, sendPreformatted } from "./telegram.js";
-import { formatReport, outcomeStats } from "./tracking.js";
+import { exportCsv, formatReport, outcomeStats } from "./tracking.js";
 import { backfill } from "./backfill.js";
 import { startCommandListener, stopCommandListener } from "./commands.js";
 
@@ -17,6 +17,7 @@ interface Args {
   report: number | null; // lookback in days
   send: boolean; // deliver the report to Telegram instead of stdout
   backfill: boolean; // recompute features for rows recorded before they existed
+  exportDays: number | null; // write every signal to CSV on stdout
   intervalMin: number;
 }
 
@@ -28,6 +29,7 @@ function parseArgs(argv: string[]): Args {
     report: null,
     send: argv.includes("--send"),
     backfill: argv.includes("--backfill"),
+    exportDays: null,
     intervalMin: config.SCAN_INTERVAL_MIN,
   };
 
@@ -40,13 +42,20 @@ function parseArgs(argv: string[]): Args {
     args.intervalMin = v;
   }
 
+  const e = argv.indexOf("--export");
+  if (e !== -1) {
+    const v = Number(argv[e + 1]);
+    args.exportDays = Number.isFinite(v) && v > 0 ? v : 7;
+  }
+
   const r = argv.indexOf("--report");
   if (r !== -1) {
     const v = Number(argv[r + 1]);
     args.report = Number.isFinite(v) && v > 0 ? v : 30;
   }
 
-  if (!args.once && !args.loop && args.report === null && !args.backfill) {
+  if (!args.once && !args.loop && args.report === null && !args.backfill &&
+      args.exportDays === null) {
     args.once = true;
   }
   return args;
@@ -132,6 +141,12 @@ async function runOnce(dryRun: boolean, prime = false): Promise<void> {
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+
+  // Plain CSV on stdout so it can be piped or redirected to a file.
+  if (args.exportDays !== null) {
+    process.stdout.write(exportCsv(args.exportDays));
+    return;
+  }
 
   if (args.backfill) {
     const r = await backfill();

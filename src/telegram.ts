@@ -52,6 +52,39 @@ export async function sendPreformatted(
   }
 }
 
+/**
+ * Upload a file to a chat. The 4096-character message limit makes per-signal
+ * detail impossible inline — thousands of rows only travel as an attachment.
+ */
+export async function sendDocument(
+  filename: string,
+  content: string,
+  chatId = config.TELEGRAM_CHAT_ID,
+  caption?: string,
+): Promise<void> {
+  assertTelegramConfigured();
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  if (caption) {
+    form.append("caption", caption.slice(0, 1024));
+    form.append("parse_mode", "HTML");
+  }
+  form.append(
+    "document",
+    new Blob([content], { type: "text/csv" }),
+    filename,
+  );
+
+  const res = await fetch(
+    `https://api.telegram.org/bot${config.TELEGRAM_BOT_TOKEN}/sendDocument`,
+    { method: "POST", body: form, signal: AbortSignal.timeout(60_000) },
+  );
+  if (!res.ok) {
+    const body = await res.text().catch(() => "");
+    throw new Error(`Telegram sendDocument ${res.status}: ${body.slice(0, 300)}`);
+  }
+}
+
 export async function sendMessage(
   text: string,
   chatId = config.TELEGRAM_CHAT_ID,

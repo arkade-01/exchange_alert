@@ -1,6 +1,6 @@
 import { config } from "./config.js";
-import { sendMessage, sendPreformatted } from "./telegram.js";
-import { formatReport, outcomeStats } from "./tracking.js";
+import { sendDocument, sendMessage, sendPreformatted } from "./telegram.js";
+import { exportCsv, formatReport, outcomeStats } from "./tracking.js";
 
 /**
  * On-demand commands over Telegram.
@@ -33,6 +33,7 @@ const HELP = [
   "<b>Commands</b>",
   "",
   "/report [days] - performance of past alerts (default 7)",
+  "/export [days] - every signal as a CSV file (default 7)",
   "/id - this chat's numeric id",
   "/help - this message",
 ].join("\n");
@@ -72,6 +73,22 @@ async function handle(
       const days = Number(arg) > 0 ? Number(arg) : 7;
       const text = formatReport(outcomeStats(days), days);
       await sendPreformatted(text, chat);
+      break;
+    }
+    case "/export": {
+      const days = Number(arg) > 0 ? Number(arg) : 7;
+      const csv = exportCsv(days);
+      const rows = Math.max(0, csv.split("\n").length - 1);
+      if (!rows) {
+        await sendMessage(`No alerts in the last ${days}d.`, chat);
+        break;
+      }
+      await sendDocument(
+        `signals-${days}d.csv`,
+        csv,
+        chat,
+        `<b>${rows}</b> signals, last ${days}d - one row each, returns already signed for direction.`,
+      );
       break;
     }
     case "/id":
